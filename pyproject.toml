@@ -86,6 +86,7 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = [
+  "ANN401",  # tests drive httpx and httpx2 through one code path, typed as Any
   "D100",    # test modules do not need module docstrings
   "D101",
   "D102",
@@ -93,7 +94,9 @@ ignore = [
   "D104",
   "D107",
   "PLR2004", # literal values are the point of an assertion
+  "RUF001",  # Turkish test data contains the dotless i, which is not a typo
   "S101",    # pytest uses bare asserts
+  "S311",    # seeded pseudo-random shuffles are deterministic test inputs
   "S105",    # fake API keys are test data
   "S106",
   "SLF001",  # white-box tests may inspect private state
@@ -144,6 +147,7 @@ branch = true
 source = ["llm_cassette"]
 
 [tool.coverage.report]
+fail_under = 97
 show_missing = true
 skip_covered = false
 exclude_also = ["if TYPE_CHECKING:", "@overload", "raise NotImplementedError", "\\.\\.\\."]
