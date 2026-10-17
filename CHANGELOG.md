@@ -1,0 +1,37 @@
+# Changelog
+
+All notable changes to this project are documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
+adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Until 1.0.0, minor
+releases may contain breaking changes.
+
+## [Unreleased]
+
+## [0.1.0] - 2026-10-18
+
+### Added
+
+- `Cassette` with the record modes `record`, `once`, `replay` and `none`; thread-safe, saved
+  atomically, and saved only when something new was recorded.
+- `CassetteTransport` and `AsyncCassetteTransport` for httpx2 (`llm_cassette.httpx2`) and httpx
+  (`llm_cassette.httpx`). Responses are recorded chunk by chunk with their timing and replayed with
+  the original chunk boundaries, instantly by default or with scaled timing (`timing_scale`).
+- Matching on method, normalized URL and canonical JSON body, with `ignore_paths`,
+  `ignore_query`, header matching and custom matchers; unmatched requests raise
+  `UnmatchedRequestError` with a diff against the closest recorded request.
+- Redaction of sensitive headers (by name and by `key`/`token`/`secret` substrings), query
+  parameters, URL passwords, JSON body paths and literal secret values, applied before anything is
+  matched, exposed or written; `SecretLeakError` if a secret survives.
+- Cassette file format version 1 in YAML (default) or JSON, with deterministic output.
+- pytest plugin: `llm_cassette` fixture, `@pytest.mark.llm_cassette` marker,
+  `llm_cassette_config` fixture for project defaults, `--llm-record-mode`, ini options, cassette
+  paths derived from the test node id, and teardown failures for swallowed unmatched requests.
+- `llm_cassette.clients` helpers that build `openai` and `anthropic` clients (sync and async)
+  wired to a cassette.
+- `llm_cassette.usage`: token usage parsed from OpenAI Chat Completions, OpenAI Responses and
+  Anthropic Messages responses, streamed or not, plus `PriceTable` cost estimates from a
+  user-supplied TOML file; `--llm-usage-report` and `--llm-price-table` print a per-test summary.
+
+[Unreleased]: https://github.com/aozmekik/llm-cassette/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/aozmekik/llm-cassette/releases/tag/v0.1.0
