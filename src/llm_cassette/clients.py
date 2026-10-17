@@ -1,10 +1,12 @@
 """Official OpenAI and Anthropic SDK clients wired to a cassette.
 
-Example:
-    >>> from llm_cassette.clients import openai_client
-    >>> def test_haiku(llm_cassette):  # doctest: +SKIP
-    ...     client = openai_client(llm_cassette)
-    ...     client.chat.completions.create(model="gpt-4o-mini", messages=[...])
+Example::
+
+    from llm_cassette.clients import openai_client
+
+    def test_haiku(llm_cassette):
+        client = openai_client(llm_cassette)
+        client.chat.completions.create(model="gpt-4o-mini", messages=[...])
 
 The helpers need ``openai>=3`` and ``anthropic>=1``, which are built on httpx2. For older SDKs,
 build the client yourself around :class:`llm_cassette.httpx.CassetteTransport`.

@@ -151,13 +151,11 @@ def _atomic_write(path: Path, text: str) -> None:
 class Cassette:
     """Recorded HTTP interactions stored in one file, and the rules for replaying them.
 
-    Example:
-        >>> import httpx2  # doctest: +SKIP
-        >>> from llm_cassette import Cassette
-        >>> from llm_cassette.httpx2 import CassetteTransport
-        >>> with Cassette("tests/cassettes/hello.yaml", mode="once") as cassette:  # doctest: +SKIP
-        ...     client = httpx2.Client(transport=CassetteTransport(cassette))
-        ...     client.get("https://example.com")
+    Example::
+
+        with Cassette("tests/cassettes/hello.yaml", mode="once") as cassette:
+            client = httpx2.Client(transport=CassetteTransport(cassette))
+            client.get("https://example.com")
 
     The cassette is thread-safe: one cassette may serve several clients and threads at once.
     Identical requests are answered by identical recorded interactions in recording order.
