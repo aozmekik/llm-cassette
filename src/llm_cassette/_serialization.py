@@ -43,8 +43,10 @@ Format: TypeAlias = Literal["yaml", "json"]
 
 _Document: TypeAlias = dict[str, object]
 
-# Characters that YAML block scalars cannot carry verbatim: the loader folds them into "\n".
-_NOT_LITERAL_SAFE = frozenset("\r\x85\u2028\u2029\ufeff")
+# Characters PyYAML treats as line breaks (YAML 1.1) or strips: in plain, single-quoted or
+# literal scalars the loader would fold them into "\n" or a space, so such strings are always
+# written double-quoted, where they are escaped.
+_NEEDS_ESCAPES = frozenset("\r\x85\u2028\u2029\ufeff")
 
 _BODY_KINDS = frozenset({"json", "text", "base64"})
 _CHUNK_KINDS = frozenset({"text", "base64"})
@@ -69,8 +71,12 @@ class _Dumper(yaml.SafeDumper):
 def _represent_str(dumper: yaml.SafeDumper, value: str) -> yaml.ScalarNode:
     # Multi-line strings (SSE chunks, pretty-printed JSON, prompts) read best as literal blocks.
     # PyYAML itself falls back to a quoted style when a literal block cannot hold the value.
-    literal = "\n" in value and not _NOT_LITERAL_SAFE.intersection(value)
-    return dumper.represent_scalar("tag:yaml.org,2002:str", value, style="|" if literal else None)
+    style: str | None = None
+    if _NEEDS_ESCAPES.intersection(value):
+        style = '"'
+    elif "\n" in value:
+        style = "|"
+    return dumper.represent_scalar("tag:yaml.org,2002:str", value, style=style)
 
 
 _Dumper.add_representer(str, _represent_str)
