@@ -1,0 +1,149 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "llm-cassette"
+dynamic = ["version"]
+description = "Record and replay LLM API calls at the httpx transport layer, with a pytest plugin."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Ahmed Semih Özmekik" }]
+requires-python = ">=3.11"
+keywords = ["llm", "openai", "anthropic", "httpx", "pytest", "vcr", "testing", "cassette"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Framework :: Pytest",
+  "Intended Audience :: Developers",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Topic :: Software Development :: Testing",
+  "Topic :: Software Development :: Testing :: Mocking",
+  "Typing :: Typed",
+]
+dependencies = ["anyio>=4.5", "pyyaml>=6.0.2"]
+
+[project.optional-dependencies]
+# The adapters import these lazily; install the one your HTTP stack uses.
+httpx = ["httpx>=0.27"]
+httpx2 = ["httpx2>=2.7"]
+
+[project.urls]
+Homepage = "https://github.com/aozmekik/llm-cassette"
+Source = "https://github.com/aozmekik/llm-cassette"
+Issues = "https://github.com/aozmekik/llm-cassette/issues"
+Changelog = "https://github.com/aozmekik/llm-cassette/blob/main/CHANGELOG.md"
+
+[project.entry-points.pytest11]
+llm_cassette = "llm_cassette.pytest_plugin"
+
+[dependency-groups]
+dev = [
+  "anthropic>=1.0",
+  "coverage>=7.6",
+  "httpx>=0.28",
+  "httpx2>=2.13",
+  "hypothesis>=6.120",
+  "mypy>=1.15",
+  "openai>=3.0",
+  "pytest>=8.3",
+  "ruff>=0.15",
+  "types-pyyaml>=6.0.12",
+]
+
+[tool.hatch.version]
+path = "src/llm_cassette/__init__.py"
+
+[tool.hatch.build.targets.sdist]
+include = ["src/llm_cassette", "tests", "README.md", "CHANGELOG.md", "LICENSE"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/llm_cassette"]
+
+# --------------------------------------------------------------------------- ruff
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = [
+  "COM812", # conflicts with the formatter
+  "CPY001", # the license is stated once, in LICENSE, not in every file
+  "D203",   # incompatible with D211 (no blank line before class docstring)
+  "D213",   # incompatible with D212 (summary on the first docstring line)
+  "TC001",  # annotation-only imports stay at module level: PEP 563 already defers
+  "TC002",  # their evaluation, and the import cost of these modules is negligible
+  "TC003",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = [
+  "D100",    # test modules do not need module docstrings
+  "D101",
+  "D102",
+  "D103",    # test functions are named after the behaviour they check
+  "D104",
+  "D107",
+  "PLR2004", # literal values are the point of an assertion
+  "S101",    # pytest uses bare asserts
+  "S105",    # fake API keys are test data
+  "S106",
+  "SLF001",  # white-box tests may inspect private state
+]
+"examples/**" = [
+  "INP001", # examples are scripts, not a package
+  "T201",   # examples print their results
+  "S101",
+  "D103",
+  "PLR2004",
+  "S105",
+  "S106",
+]
+"benchmarks/**" = ["INP001", "T201", "S101", "PLR2004"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.pylint]
+max-args = 7 # keyword-only configuration arguments are clearer than an options object
+
+[tool.ruff.lint.flake8-annotations]
+allow-star-arg-any = true # the client helpers forward **kwargs to the SDK constructors
+
+[tool.ruff.lint.flake8-pytest-style]
+fixture-parentheses = false
+mark-parentheses = false
+
+# --------------------------------------------------------------------------- mypy
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_unreachable = true
+enable_error_code = ["ignore-without-code", "redundant-expr", "truthy-bool", "possibly-undefined"]
+files = ["src", "tests", "examples", "benchmarks"]
+
+# --------------------------------------------------------------------------- pytest
+[tool.pytest.ini_options]
+minversion = "8.3"
+testpaths = ["tests"]
+addopts = ["-ra", "--strict-markers", "--strict-config", "-p", "pytester"]
+xfail_strict = true
+filterwarnings = ["error"]
+
+# --------------------------------------------------------------------------- coverage
+[tool.coverage.run]
+branch = true
+source = ["llm_cassette"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false
+exclude_also = ["if TYPE_CHECKING:", "@overload", "raise NotImplementedError", "\\.\\.\\."]
