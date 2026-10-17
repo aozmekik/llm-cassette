@@ -167,6 +167,8 @@ ERRORS = [
     ("- a list", "yaml", "document: expected a mapping"),
     ("interactions: []", "yaml", "unsupported cassette schema version None"),
     ("version: 2\ninteractions: []", "yaml", "unsupported cassette schema version 2"),
+    ("version: 1.0\ninteractions: []", "yaml", "unsupported cassette schema version 1.0"),
+    ("version: true\ninteractions: []", "yaml", "unsupported cassette schema version True"),
     ("version: 1\nextra: 1", "yaml", "unknown key"),
     ("version: 1\ninteractions: {}", "yaml", "interactions: expected a list"),
     ("version: 1\ninteractions: [1]", "yaml", r"interactions\[0\]: expected a mapping"),

@@ -306,7 +306,8 @@ def loads(text: str, fmt: Format, *, source: str) -> list[Interaction]:
         raise CassetteFormatError(msg) from None
     document = reader.mapping(parsed, "document")
     version = document.get("version")
-    if version != SCHEMA_VERSION:
+    # `1.0` and `true` compare equal to 1 in Python, so check the type as well.
+    if type(version) is not int or version != SCHEMA_VERSION:
         msg = (
             f"unsupported cassette schema version {version!r} "
             f"(this llm-cassette reads version {SCHEMA_VERSION})"
