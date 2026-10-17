@@ -252,13 +252,12 @@ def test_a_swallowed_unmatched_request_still_fails_the_test(project: pytest.Pyte
     project.makepyfile(
         test_demo="""
         import pytest
-        from llm_cassette import UnmatchedRequestError
 
         @pytest.mark.llm_cassette(mode="none")
         def test_chat(ask):
             try:
                 ask("hi")
-            except UnmatchedRequestError:
+            except Exception:
                 pass  # the code under test hides the failure
         """
     )

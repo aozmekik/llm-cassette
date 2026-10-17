@@ -118,10 +118,18 @@ def test_an_unmatched_request_surfaces_through_the_sdk(
         chat(openai_client(cassette, transport=upstream.transport(), api_key=FAKE_OPENAI_KEY))
     with Cassette(cassette_path, mode="none") as cassette:
         client = openai_client(cassette)
-        # openai>=3 only wraps httpx2 errors, so the cassette's own error reaches the caller.
-        with pytest.raises(UnmatchedRequestError, match=r'\+  "model": "gpt-4o"'):
+        # Recent openai releases let the cassette's error through; older 3.x releases wrap it in
+        # APIConnectionError with the original as the cause.
+        with pytest.raises((UnmatchedRequestError, openai.APIConnectionError)) as raised:
             client.chat.completions.create(model="gpt-4o", messages=MESSAGES)
-        assert len(cassette.unmatched) == 1
+        error = (
+            raised.value
+            if isinstance(raised.value, UnmatchedRequestError)
+            else raised.value.__cause__
+        )
+        assert isinstance(error, UnmatchedRequestError)
+        assert '+  "model": "gpt-4o"' in str(error)
+        assert cassette.unmatched == (error,), "max_retries=0: the SDK did not retry"
 
 
 def test_ignore_paths_tolerate_volatile_fields(cassette_path: Path, upstream: FakeUpstream) -> None:
