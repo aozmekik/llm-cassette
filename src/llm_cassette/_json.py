@@ -51,6 +51,9 @@ def parse_document(data: bytes) -> JSONDocument | None:
     if not isinstance(value, dict | list):  # pragma: no cover - guarded by the first-byte check
         return None
     document = cast("JSONDocument", value)
+    # Counting brackets (in C) bounds the depth from above, so the walk is rarely needed.
+    if stripped.count(b"[") + stripped.count(b"{") <= MAX_DEPTH:
+        return document
     return document if _depth(document) <= MAX_DEPTH else None
 
 

@@ -337,3 +337,27 @@ def test_configuration_is_exposed(cassette_path: Path) -> None:
     assert cassette.mode is RecordMode.NONE
     assert cassette.timing_scale == 2.0
     assert cassette.redaction.placeholder == "REDACTED"
+
+
+def test_custom_matchers_pick_among_built_in_matches(cassette_path: Path) -> None:
+    with Cassette(cassette_path, mode="record") as cassette:
+        for tenant in ("a", "b"):
+            recording = cassette.resolve(
+                RecordedRequest("POST", URL, (("x-tenant", tenant),), b'{"p": "hi"}')
+            )
+            assert isinstance(recording, Recording)
+            recording.start(200, [], delay_ms=0)
+            recording.add_chunk(tenant.encode(), delay_ms=0)
+        record(cassette, req("other"))
+    calls: list[str | None] = []
+
+    def same_tenant(live: RecordedRequest, recorded: RecordedRequest) -> bool:
+        calls.append(recorded.header("x-tenant"))
+        return live.header("x-tenant") == recorded.header("x-tenant")
+
+    cassette = Cassette(cassette_path, mode="none", matching=Matching(custom=[same_tenant]))
+    live = RecordedRequest("POST", URL, (("x-tenant", "b"),), b'{"p": "hi"}')
+    assert bodies(cassette, live) == [b"b"]
+    assert calls == ["a", "b"], "only interactions with an equal method, URL and body are tried"
+    with pytest.raises(UnmatchedRequestError, match="1 matching interaction"):
+        cassette.resolve(live)

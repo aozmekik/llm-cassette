@@ -18,6 +18,7 @@ from llm_cassette._matching import (
     Matching,
     RequestKey,
     describe_unmatched,
+    index_key,
     mismatches,
     request_key,
 )
@@ -206,6 +207,7 @@ class Cassette:
             text = self._path.read_text(encoding="utf-8")
             self._replayable = tuple(loads(text, self._format, source=str(self._path)))
         self._keys: list[RequestKey] | None = None
+        self._index: dict[tuple[object, ...], list[int]] | None = None
         self._recordings: list[Recording] = []
         self._played: list[Interaction | Recording] = []
         self._used: set[int] = set()
@@ -322,43 +324,54 @@ class Cassette:
             return self._replay(live)
 
     def _replay(self, live: RecordedRequest) -> Interaction:
-        if self._keys is None:
+        if self._index is None:
             self._keys = [request_key(self._matching, i.request) for i in self._replayable]
+            self._index = {}
+            for position, key in enumerate(self._keys):
+                self._index.setdefault(index_key(self._matching, key), []).append(position)
         live_key = request_key(self._matching, live)
-        candidates: list[Candidate] = []
-        matching_indexes: list[int] = []
-        for index, (interaction, key) in enumerate(zip(self._replayable, self._keys, strict=True)):
-            reasons = mismatches(self._matching, live, live_key, interaction.request, key)
-            if reasons:
-                candidates.append(Candidate(index, interaction, reasons))
-                continue
-            if index not in self._used:
-                self._used.add(index)
-                self._played.append(interaction)
-                return interaction
-            matching_indexes.append(index)
-        if matching_indexes and self._allow_repeats:
-            interaction = self._replayable[matching_indexes[-1]]
+        # The index narrows the search to interactions whose built-in aspects are equal, so the
+        # cost of a hit does not grow with the cassette; custom matchers only see that bucket.
+        bucket = self._index.get(index_key(self._matching, live_key), [])
+        matching_indexes = [
+            position
+            for position in bucket
+            if all(
+                match(live, self._replayable[position].request) for match in self._matching.custom
+            )
+        ]
+        unused = next((p for p in matching_indexes if p not in self._used), None)
+        if unused is not None:
+            self._used.add(unused)
+        elif matching_indexes and self._allow_repeats:
+            unused = matching_indexes[-1]
+        if unused is not None:
+            interaction = self._replayable[unused]
             self._played.append(interaction)
             return interaction
+        raise self._unmatched_error(live, live_key, exhausted=len(matching_indexes))
+
+    def _unmatched_error(
+        self, live: RecordedRequest, live_key: RequestKey, *, exhausted: int
+    ) -> UnmatchedRequestError:
+        keys = self._keys or []
+        candidates = [
+            Candidate(position, interaction, reasons)
+            for position, (interaction, key) in enumerate(zip(self._replayable, keys, strict=True))
+            if (reasons := mismatches(self._matching, live, live_key, interaction.request, key))
+        ]
         description = f"{self._path} (mode={self._mode.value}, "
         description += (
             f"{len(self._replayable)} recorded, {len(self._used)} played)"
             if self._file_existed
             else "file does not exist)"
         )
-        error = UnmatchedRequestError(
-            describe_unmatched(
-                self._matching,
-                live,
-                candidates,
-                cassette=description,
-                exhausted=len(matching_indexes),
-            ),
-            request=live,
+        message = describe_unmatched(
+            self._matching, live, candidates, cassette=description, exhausted=exhausted
         )
+        error = UnmatchedRequestError(message, request=live)
         self._unmatched.append(error)
-        raise error
+        return error
 
     def _changed(self) -> None:
         with self._lock:

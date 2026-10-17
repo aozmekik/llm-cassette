@@ -139,6 +139,19 @@ def request_key(matching: Matching, request: RecordedRequest) -> RequestKey:
     )
 
 
+def index_key(matching: Matching, key: RequestKey) -> tuple[object, ...]:
+    """The parts of ``key`` that built-in matching compares, usable as a dictionary key.
+
+    Two requests pass every built-in comparison exactly when their index keys are equal.
+    """
+    return (
+        key.method if matching.method else None,
+        key.url if matching.url else None,
+        key.body if matching.body else None,
+        key.headers,
+    )
+
+
 def _matcher_name(matcher: Matcher) -> str:
     return getattr(matcher, "__qualname__", None) or repr(matcher)
 
