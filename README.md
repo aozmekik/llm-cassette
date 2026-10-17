@@ -350,19 +350,20 @@ same for one or a thousand recorded interactions; the full comparison only runs 
 
 | | tested with |
 |---|---|
-| Python | 3.12.10, 3.13 and 3.14.5 locally; CI runs 3.11 to 3.14 on Ubuntu and 3.14 on macOS |
+| Python | 3.11.16, 3.12.10, 3.13.2 and 3.14.5 locally (macOS); CI runs 3.11 to 3.14 on Ubuntu and 3.14 on macOS |
 | SDKs | `openai` 3.0.0 and 3.34.0, `anthropic` 1.0.0 and 1.15.0 |
 | HTTP | `httpx2` 2.7.0 and 2.13.1, `httpx` 0.27.0 and 0.28.1 |
 
 The lowest versions come from installing with `uv pip install --resolution lowest-direct -e .
---group dev` and running the full suite (328 tests passed on Python 3.12.10); CI repeats this on
+--group dev` and running the full suite (331 tests passed on Python 3.12.10); CI repeats this on
 Python 3.11. Windows is not tested yet.
 
 ## Testing
 
-The suite has 328 tests (`uv run pytest`) and 100% line and branch coverage of `src/`
-(`uv run coverage run -m pytest && uv run coverage report`: 1456 statements, 362 branches),
-measured on an Apple M1 Pro with 16 GB, macOS 26, Python 3.14.5. No test calls a real API: fake
+The suite has 331 tests and 100% line and branch coverage of `src/` (1460 statements, 362
+branches), from `uv run coverage run -m pytest && uv run coverage report` in a fresh clone on an
+Apple M1 Pro with 16 GB, macOS 26, with Python 3.14.5 and again with 3.11.16; the suite also
+passed on 3.12.10 and 3.13.2. No test calls a real API: fake
 upstreams built on `httpx2.MockTransport` follow the documented OpenAI Chat Completions
 (including `include_usage` streaming), OpenAI Responses and Anthropic Messages (including the
 `message_start`, `content_block_start`, `content_block_delta`, `message_delta` and `message_stop`
@@ -375,16 +376,17 @@ cassette format and check the SSE parser and the path rewriter.
 
 `uv run python benchmarks/replay_overhead.py` (1000 calls x 7 repeats after a warm-up repeat;
 median, min-max in parentheses; synthetic payloads). Apple M1 Pro, 16 GB, macOS 26, Python
-3.14.5, httpx2 2.13.1. Other heavy jobs were running on the machine (load average about 35 on 8
-cores), so treat the numbers as rough.
+3.14.5, httpx2 2.13.1. Other heavy jobs were running on the machine (load average about 32 on 8
+cores), so treat the numbers as rough: two earlier runs (one on Python 3.11.16) measured an
+overhead of 46-51 us for the JSON case and 64-94 us for the SSE case.
 
 Per request through an `httpx2.Client`, compared with an `httpx2.MockTransport` that builds the
 same response in memory:
 
 | response | mock, us/request | replay, us/request | overhead, us |
 |---|---|---|---|
-| 2 KB JSON, 1 chunk | 47 (45-50) | 98 (94-113) | 51 |
-| SSE, 201 chunks | 108 (107-125) | 172 (169-194) | 64 |
+| 2 KB JSON, 1 chunk | 48 (47-51) | 108 (100-114) | 60 |
+| SSE, 201 chunks | 128 (112-194) | 174 (171-183) | 46 |
 
 `Cassette.resolve` alone (redact, normalize and look up a 2 KB JSON request), with the matching
 interaction recorded last:
@@ -392,9 +394,9 @@ interaction recorded last:
 | recorded interactions | us/call |
 |---|---|
 | 1 | 14 (13-14) |
-| 10 | 13 (13-13) |
-| 100 | 14 (13-16) |
-| 1000 | 14 (13-14) |
+| 10 | 14 (14-18) |
+| 100 | 14 (13-15) |
+| 1000 | 14 (14-15) |
 
 In other words, replaying adds tens of microseconds per request, which is negligible next to a
 real API round trip.
