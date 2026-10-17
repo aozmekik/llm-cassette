@@ -71,8 +71,8 @@ def test_depth_limit_is_inclusive() -> None:
     assert parse_document(b"[" * MAX_DEPTH + b"]" * MAX_DEPTH) is not None
     assert parse_document(b"[" * (MAX_DEPTH + 1) + b"]" * (MAX_DEPTH + 1)) is None
     assert parse_document(b'{"a": ' * MAX_DEPTH + b"1" + b"}" * MAX_DEPTH) is not None
-    wide = b"[" + b",".join([b"[]"] * (MAX_DEPTH * 2)) + b"]"
-    assert parse_document(wide) == [[]] * (MAX_DEPTH * 2), "many brackets, but shallow"
+    wide = b"[" + b",".join([b"[1]"] * (MAX_DEPTH * 2)) + b"]"
+    assert parse_document(wide) == [[1]] * (MAX_DEPTH * 2), "many brackets, but shallow"
 
 
 @given(json_documents, st.randoms())
