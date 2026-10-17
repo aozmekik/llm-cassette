@@ -58,7 +58,8 @@ pip install "git+https://github.com/aozmekik/llm-cassette"
 Requires Python 3.11 or newer. The adapters use whichever HTTP library you already have; the
 `httpx` and `httpx2` extras pull one in explicitly
 (`pip install "llm-cassette[httpx2] @ git+https://github.com/aozmekik/llm-cassette"`). The SDK
-helpers need `openai>=3` and/or `anthropic>=1`, which depend on `httpx2`.
+helpers need `openai>=3` and/or `anthropic>=1`, which depend on `httpx2`. The pytest plugin
+needs pytest 8.3 or newer.
 
 ## Quick start
 
@@ -160,9 +161,9 @@ from llm_cassette import Matching
 Matching(
     ignore_paths=["metadata.user_id", "messages.*.cache_control"],  # removed from both bodies
     ignore_query=["trace_id"],
-    headers=["anthropic-beta"],              # these header values must match too
+    headers=["anthropic-beta"],  # these header values must match too
     custom=[lambda live, recorded: live.json()["model"] == recorded.json()["model"]],
-    body=False,                              # any built-in comparison can be switched off
+    body=False,  # any built-in comparison can be switched off
 )
 ```
 
@@ -197,7 +198,7 @@ from llm_cassette import Redaction
 
 Redaction(
     headers={"authorization", "x-api-key", "x-tenant-id"},  # replaces the default set
-    substrings=("key", "secret"),        # default ("key", "token", "secret")
+    substrings=("key", "secret"),  # default ("key", "token", "secret")
     query_params={"sig"},
     body_paths=["user", "metadata.email"],
     secrets=[os.environ["MY_GATEWAY_TOKEN"]],
@@ -223,7 +224,7 @@ import httpx2
 from llm_cassette import Cassette
 from llm_cassette.httpx2 import CassetteTransport  # llm_cassette.httpx for httpx 0.x
 
-with Cassette("cassettes/chat.yaml", mode="once") as cassette:   # saved on exit
+with Cassette("cassettes/chat.yaml", mode="once") as cassette:  # saved on exit
     client = httpx2.Client(transport=CassetteTransport(cassette))
     client.post("https://api.openai.com/v1/chat/completions", json={...})
 ```
