@@ -103,6 +103,7 @@ ignore = [
 ]
 "examples/**" = [
   "INP001", # examples are scripts, not a package
+  "RUF001", # Turkish sample text contains the dotless i
   "T201",   # examples print their results
   "S101",
   "D103",

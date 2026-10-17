@@ -1,0 +1,38 @@
+version: 1
+interactions:
+  - request:
+      method: POST
+      url: https://api.openai.com/v1/chat/completions
+      headers:
+        accept: application/json
+        accept-encoding: gzip, deflate, zstd
+        authorization: REDACTED
+        content-type: application/json
+        user-agent: OpenAI/Python 3.34.0
+        x-stainless-arch: arm64
+        x-stainless-async: 'false'
+        x-stainless-lang: python
+        x-stainless-os: MacOS
+        x-stainless-package-version: 3.34.0
+        x-stainless-read-timeout: '600'
+        x-stainless-retry-count: '0'
+        x-stainless-runtime: CPython
+        x-stainless-runtime-version: 3.14.5
+      body:
+        json:
+          messages:
+            - content: Merhaba
+              role: user
+          metadata:
+            run_id: ba0deb1e-078a-4769-b7bd-663222d5027d
+          model: gpt-4o-mini
+          user: REDACTED
+    response:
+      status: 200
+      headers:
+        content-length: '276'
+        content-type: application/json
+      delay_ms: 0.8
+      chunks:
+        - delay_ms: 0.1
+          text: '{"id":"chatcmpl-demo","created":1760000000,"model":"gpt-4o-mini-2024-07-18","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"Echo: Merhaba"},"finish_reason":"stop"}],"usage":{"prompt_tokens":12,"completion_tokens":3,"total_tokens":15}}'
