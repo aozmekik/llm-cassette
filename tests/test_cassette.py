@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import stat
 import threading
 from pathlib import Path
 
@@ -253,6 +255,17 @@ def test_saving_is_atomic(cassette_path: Path, monkeypatch: pytest.MonkeyPatch) 
         cassette.save()
     assert cassette_path.read_bytes() == before
     assert sorted(p.name for p in cassette_path.parent.iterdir()) == [cassette_path.name]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permissions")
+def test_saved_files_get_ordinary_permissions(cassette_path: Path) -> None:
+    with Cassette(cassette_path, mode="record") as cassette:
+        record(cassette, req())
+    assert stat.S_IMODE(cassette_path.stat().st_mode) == 0o644
+    cassette_path.chmod(0o664)
+    with Cassette(cassette_path, mode="record") as cassette:
+        record(cassette, req("again"))
+    assert stat.S_IMODE(cassette_path.stat().st_mode) == 0o664, "an existing mode is kept"
 
 
 def test_context_manager_saves_even_when_the_block_raises(cassette_path: Path) -> None:

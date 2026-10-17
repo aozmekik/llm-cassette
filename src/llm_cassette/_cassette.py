@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import os
+import stat
 import tempfile
 import threading
 from collections.abc import Callable, Iterable
@@ -33,6 +34,7 @@ from llm_cassette._redaction import Redaction
 from llm_cassette._serialization import Format, dumps, loads
 
 _FORMATS: dict[str, Format] = {".yaml": "yaml", ".yml": "yaml", ".json": "json"}
+_NEW_FILE_MODE = 0o644
 
 
 class RecordMode(StrEnum):
@@ -132,10 +134,14 @@ def _format_for(path: Path) -> Format:
 
 def _atomic_write(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    # mkstemp creates the file readable by its owner only; keep an existing cassette's mode, and
+    # give a new one the usual 0o644 rather than leaving it private.
+    mode = stat.S_IMODE(path.stat().st_mode) if path.exists() else _NEW_FILE_MODE
     fd, temporary = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
     try:
         with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
             handle.write(text)
+        Path(temporary).chmod(mode)
         Path(temporary).replace(path)
     except BaseException:
         Path(temporary).unlink(missing_ok=True)
