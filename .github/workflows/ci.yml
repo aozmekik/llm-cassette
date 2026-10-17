@@ -1,0 +1,113 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FORCE_COLOR: "1"
+  # Fail instead of silently re-locking when uv.lock is out of date.
+  UV_LOCKED: "1"
+
+jobs:
+  lint:
+    name: Lint and type-check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      # setup-uv stopped publishing floating major tags after v7, so pin the latest release.
+      - uses: astral-sh/setup-uv@v10.3.0
+        with:
+          python-version: "3.14"
+          enable-cache: true
+      - run: uv sync
+      - run: uv run ruff format --check .
+      - run: uv run ruff check .
+      - run: uv run mypy
+
+  test:
+    name: Test (Python ${{ matrix.python }}, ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        python: ["3.11", "3.12", "3.13", "3.14"]
+        include:
+          - os: macos-latest
+            python: "3.14"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.0
+        with:
+          python-version: ${{ matrix.python }}
+          enable-cache: true
+      - run: uv sync
+      - run: uv run coverage run -m pytest
+      - run: uv run coverage report
+
+  lowest:
+    name: Test lowest dependency versions (Python 3.11)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.0
+        with:
+          python-version: "3.11"
+      - run: uv venv .venv-lowest
+      - run: uv pip install --python .venv-lowest --resolution lowest-direct -e . --group dev
+      - run: .venv-lowest/bin/python -m pytest
+
+  examples:
+    name: Examples and benchmark smoke run
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.0
+        with:
+          python-version: "3.14"
+          enable-cache: true
+      - run: uv sync
+      - run: uv run python examples/quickstart.py
+      - run: uv run python examples/openai_streaming.py
+      - name: Replay the committed demo cassettes
+        run: >-
+          uv run pytest examples/pytest_demo --llm-record-mode=none --llm-usage-report
+          --llm-price-table examples/pytest_demo/prices.toml
+      - name: Replaying must not modify the committed cassettes
+        run: git diff --exit-code
+      - run: uv run python benchmarks/replay_overhead.py --quick
+
+  build:
+    name: Build and install the wheel
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.0
+        with:
+          python-version: "3.14"
+      - run: uv build
+      - name: Check the wheel contents
+        run: unzip -l dist/*.whl | grep -E "llm_cassette/(py\.typed|pytest_plugin\.py)$"
+      - name: Install the wheel into a clean environment
+        run: |
+          uv venv "$RUNNER_TEMP/wheel-check"
+          uv pip install --python "$RUNNER_TEMP/wheel-check" dist/*.whl
+          "$RUNNER_TEMP/wheel-check/bin/python" - <<'PY'
+          from importlib.metadata import entry_points
+
+          import llm_cassette
+
+          plugins = {entry.name for entry in entry_points(group="pytest11")}
+          assert "llm_cassette" in plugins, plugins
+          print("llm-cassette", llm_cassette.__version__, "with pytest plugin")
+          PY
