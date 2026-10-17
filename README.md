@@ -355,8 +355,8 @@ same for one or a thousand recorded interactions; the full comparison only runs 
 | HTTP | `httpx2` 2.7.0 and 2.13.1, `httpx` 0.27.0 and 0.28.1 |
 
 The lowest versions come from installing with `uv pip install --resolution lowest-direct -e .
---group dev` and running the full suite (331 tests passed on Python 3.12.10); CI repeats this on
-Python 3.11. Windows is not tested yet.
+--group dev` and running the full suite (331 tests passed on Python 3.11.16 and 3.12.10); CI
+repeats this on Python 3.11. Windows is not tested yet.
 
 ## Testing
 
