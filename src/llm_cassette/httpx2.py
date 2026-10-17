@@ -34,13 +34,18 @@ from llm_cassette._transport import (
 __all__ = ["AsyncCassetteTransport", "CassetteTransport"]
 
 
+# Every stream below is single-pass, like a network stream: iterating it again continues where
+# the previous iteration stopped. SDKs rely on this when they drain a response after the last
+# event (openai's async client does), so a second pass must neither fail nor start over.
+
+
 class _ReplayStream(httpx2.SyncByteStream):
     def __init__(self, plan: ReplayPlan, sleep: Callable[[float], None]) -> None:
-        self._plan = plan
+        self._chunks = iter(plan.chunks)
         self._sleep = sleep
 
     def __iter__(self) -> Iterator[bytes]:
-        for data, delay in self._plan.chunks:
+        for data, delay in self._chunks:
             if delay > 0:
                 self._sleep(delay)
             yield data
@@ -48,11 +53,11 @@ class _ReplayStream(httpx2.SyncByteStream):
 
 class _AsyncReplayStream(httpx2.AsyncByteStream):
     def __init__(self, plan: ReplayPlan, sleep: Callable[[float], Awaitable[None]]) -> None:
-        self._plan = plan
+        self._chunks = iter(plan.chunks)
         self._sleep = sleep
 
     async def __aiter__(self) -> AsyncGenerator[bytes]:
-        for data, delay in self._plan.chunks:
+        for data, delay in self._chunks:
             if delay > 0:
                 await self._sleep(delay)
             yield data
@@ -66,7 +71,8 @@ class _RecordingStream(httpx2.SyncByteStream):
         self._chunks: Iterator[bytes] | None = None
 
     def __iter__(self) -> Iterator[bytes]:
-        self._chunks = self._upstream.iter_bytes()
+        if self._chunks is None:
+            self._chunks = self._upstream.iter_bytes()
         try:
             for chunk in self._chunks:
                 self._recording.add_chunk(chunk, delay_ms=self._watch.lap_ms())
@@ -90,7 +96,8 @@ class _AsyncRecordingStream(httpx2.AsyncByteStream):
         self._chunks: AsyncIterator[bytes] | None = None
 
     async def __aiter__(self) -> AsyncGenerator[bytes]:
-        self._chunks = self._upstream.aiter_bytes()
+        if self._chunks is None:
+            self._chunks = self._upstream.aiter_bytes()
         try:
             async for chunk in self._chunks:
                 self._recording.add_chunk(chunk, delay_ms=self._watch.lap_ms())
