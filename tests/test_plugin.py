@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-import textwrap
+import hashlib
+import re
 from pathlib import Path
 
 # In-process pytester sessions drop every module they import, so the next session imports (and
@@ -83,27 +84,95 @@ def test_cassette_names_follow_the_node_id(project: pytest.Pytester) -> None:
         import pytest
 
         class TestGroup:
-            @pytest.mark.parametrize("prompt", ["a b", "c/d"])
+            @pytest.mark.parametrize("prompt", ["What is 2+2?", "What is 2*2?", "gpt-4o-mini"])
             def test_param(self, ask, prompt):
-                ask(prompt)
+                assert ask(prompt).endswith(prompt)
 
-        @pytest.mark.llm_cassette("shared")
-        def test_one(ask):
-            ask("same")
-
-        @pytest.mark.llm_cassette(name="shared")
-        def test_two(ask, upstream):
-            ask("same")
-            assert upstream.calls == 0, "replayed from the cassette that test_one recorded"
+        @pytest.mark.llm_cassette("custom_name")
+        def test_named(ask):
+            ask("named")
         """
     )
     project.runpytest().assert_outcomes(passed=4)
-    folder = project.path / "cassettes" / "test_names"
-    assert sorted(p.name for p in folder.iterdir()) == [
-        "TestGroup.test_param[a b].yaml".replace(" ", "_"),
-        "TestGroup.test_param[c_d].yaml",
-        "shared.yaml",
-    ]
+    project.runpytest("--llm-record-mode=none").assert_outcomes(passed=4)
+    names = sorted(p.name for p in (project.path / "cassettes" / "test_names").iterdir())
+    assert re.fullmatch(r"TestGroup\.test_param\[What_is_2_2_\]-[0-9a-f]{8}\.yaml", names[0])
+    assert re.fullmatch(r"TestGroup\.test_param\[What_is_2_2_\]-[0-9a-f]{8}\.yaml", names[1])
+    assert names[0] != names[1], "names that only sanitize alike get different files"
+    assert names[2] == "TestGroup.test_param[gpt-4o-mini].yaml", "safe names are kept as they are"
+    assert names[3] == "custom_name.yaml"
+
+
+def test_two_tests_cannot_share_a_cassette(project: pytest.Pytester) -> None:
+    project.makepyfile(
+        test_names="""
+        import pytest
+
+        @pytest.mark.llm_cassette("shared")
+        def test_one(ask):
+            ask("one")
+
+        @pytest.mark.llm_cassette(name="shared")
+        def test_two(ask):
+            ask("two")
+        """
+    )
+    result = project.runpytest()
+    result.assert_outcomes(passed=1, errors=1)
+    result.stdout.fnmatch_lines(
+        [
+            (
+                "*test_names.py::test_two cannot use the cassette *shared.yaml: "
+                "test_names.py::test_one already uses it. A cassette holds the traffic of one test*"
+            )
+        ]
+    )
+
+
+def test_cassette_names_are_compared_case_insensitively(project: pytest.Pytester) -> None:
+    """test_A and test_a would share one file on macOS and Windows checkouts."""
+    project.makepyfile(
+        test_names="""
+        def test_A(ask):
+            ask("upper")
+
+        def test_a(ask):
+            ask("lower")
+        """
+    )
+    result = project.runpytest()
+    result.assert_outcomes(passed=1, errors=1)
+    result.stdout.fnmatch_lines(["*test_a cannot use the cassette *test_A already uses it (as*"])
+
+
+def test_a_rerun_of_the_same_test_keeps_its_cassette(project: pytest.Pytester) -> None:
+    """A test may claim its own cassette again, as when pytest-rerunfailures reruns it."""
+    project.makepyfile(
+        test_names="""
+        import pytest
+        from llm_cassette.pytest_plugin import _claim
+
+        def test_twice(request, llm_cassette):
+            _claim(request.config, llm_cassette.path, request.node.nodeid)
+        """
+    )
+    project.runpytest().assert_outcomes(passed=1)
+
+
+def test_an_absolute_cassette_dir_mirrors_the_test_tree(
+    project: pytest.Pytester, tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    target = tmp_path_factory.mktemp("recordings")
+    project.makeini(f"[pytest]\nllm_cassette_dir = {target}\n")
+    for folder in ("unit", "e2e"):
+        package = project.mkpydir(f"suite_{folder}")
+        (package / "test_chat.py").write_text(
+            f"def test_chat(ask):\n    assert ask('{folder}').endswith('{folder}')\n"
+        )
+    project.runpytest().assert_outcomes(passed=2)
+    assert (target / "suite_unit" / "test_chat" / "test_chat.yaml").exists()
+    assert (target / "suite_e2e" / "test_chat" / "test_chat.yaml").exists()
+    project.runpytest("--llm-record-mode=none").assert_outcomes(passed=2)
 
 
 def test_cli_mode_overrides_markers(project: pytest.Pytester) -> None:
@@ -238,7 +307,7 @@ def test_invalid_ini_options_are_usage_errors(
     result.stderr.fnmatch_lines([f"*{message}*"])
 
 
-def test_an_absolute_cassette_dir(
+def test_an_absolute_cassette_dir_for_a_top_level_test_file(
     project: pytest.Pytester, tmp_path_factory: pytest.TempPathFactory
 ) -> None:
     target = tmp_path_factory.mktemp("elsewhere")
@@ -371,10 +440,29 @@ def test_render_usage_report_marks_unpriced_models(tmp_path: Path) -> None:
     assert lines[-1] == "n/a: no price in --llm-price-table for other"
 
 
+def _digest(name: str) -> str:
+    return hashlib.sha256(name.encode()).hexdigest()[:8]
+
+
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [
+        ("test_chat", "test_chat"),
+        ("TestChat.test_stream[gpt-4o-mini-0.5]", "TestChat.test_stream[gpt-4o-mini-0.5]"),
+        ("a/b\\c:d", f"a_b_c_d-{_digest('a/b' + chr(92) + 'c:d')}"),
+        ("test_x[What is 2+2?]", f"test_x[What_is_2_2_]-{_digest('test_x[What is 2+2?]')}"),
+        ("...", f"cassette-{_digest('...')}"),
+        ("_private", f"private-{_digest('_private')}"),
+    ],
+)
+def test_safe_filenames(name: str, expected: str) -> None:
+    assert _safe_filename(name) == expected
+
+
 def test_long_names_are_shortened_deterministically() -> None:
     name = "test_x[" + "a" * 300 + "]"
     shortened = _safe_filename(name)
-    assert len(shortened) == 133
+    assert shortened == f"{name[:120]}-{_digest(name)}"
     assert shortened == _safe_filename(name)
-    assert _safe_filename("...") == "cassette"
-    assert _safe_filename(textwrap.dedent("a/b\\c:d")) == "a_b_c_d"
+    other = "test_x[" + "a" * 299 + "b]"
+    assert _safe_filename(other) != shortened, "same prefix, different file"

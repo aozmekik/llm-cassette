@@ -13,6 +13,7 @@ Options, from lowest to highest precedence:
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import os
 import re
@@ -55,9 +56,12 @@ _MARKER_KEYS = _CONFIG_KEYS | {"name", "ignore_paths"}
 _SUFFIXES = {"yaml": ".yaml", "json": ".json"}
 _UNSAFE_FILENAME_CHARS = re.compile(r"[^A-Za-z0-9_.\-\[\]]+")
 _MAX_FILENAME = 120
+_DIGEST_LENGTH = 8
 _MIN_SECRET_LENGTH = 8
 
 _PHASE_REPORTS = pytest.StashKey[dict[str, pytest.TestReport]]()
+# Which test owns each cassette file in this session, keyed by the case-folded path.
+_CASSETTE_OWNERS = pytest.StashKey[dict[str, tuple[str, Path]]]()
 _T = TypeVar("_T")  # PEP 695 syntax would need Python 3.12
 
 
@@ -202,25 +206,56 @@ def _expect(value: object, kind: type[_T], what: str) -> _T:
 
 
 def _safe_filename(name: str) -> str:
+    """A portable file name for ``name``, distinct for distinct names.
+
+    Characters outside ``[A-Za-z0-9_.-[]]`` become ``_``. Whenever that changes the name (or it
+    is too long), a short hash of the original is appended, so ``What is 2+2?`` and
+    ``What is 2*2?`` do not end up in the same file.
+    """
     safe = _UNSAFE_FILENAME_CHARS.sub("_", name).strip("._") or "cassette"
-    if len(safe) <= _MAX_FILENAME:
+    if safe == name and len(safe) <= _MAX_FILENAME:
         return safe
-    digest = hashlib.sha256(name.encode()).hexdigest()[:12]
-    return f"{safe[:_MAX_FILENAME]}-{digest}"
+    digest = hashlib.sha256(name.encode("utf-8", "surrogatepass")).hexdigest()
+    return f"{safe[:_MAX_FILENAME]}-{digest[:_DIGEST_LENGTH]}"
 
 
 def cassette_path(item: pytest.Item, *, name: str | None, directory: str, fmt: str) -> Path:
     """Where the cassette of ``item`` lives.
 
     ``<test file dir>/<directory>/<test module>/<name>.<fmt>``, where ``name`` defaults to the
-    test's node id without the module, e.g. ``TestChat.test_stream[gpt-4o-mini]``.
+    test's node id without the module, e.g. ``TestChat.test_stream[gpt-4o-mini]``. An absolute
+    ``directory`` mirrors the test file's location below the rootdir, so ``tests/unit/test_x.py``
+    and ``tests/e2e/test_x.py`` keep separate folders.
     """
     module = item.path
     base = Path(directory)
     if not base.is_absolute():
         base = module.parent / base
+    else:
+        # A test file outside the rootdir keeps the bare module folder; _claim catches clashes.
+        with contextlib.suppress(ValueError):
+            base /= module.parent.relative_to(item.config.rootpath)
     stem = name if name is not None else item.nodeid.split("::", 1)[-1].replace("::", ".")
     return base / module.stem / f"{_safe_filename(stem)}{_SUFFIXES[fmt]}"
+
+
+def _claim(config: pytest.Config, path: Path, nodeid: str) -> None:
+    """Fail unless ``path`` belongs to the test ``nodeid`` alone in this session.
+
+    Two tests sharing a cassette would overwrite each other's recordings (``record``) or replay
+    the other test's traffic (``once``). Paths are compared case-insensitively, because the
+    cassettes are committed and checked out on case-insensitive file systems too.
+    """
+    owners = config.stash.setdefault(_CASSETTE_OWNERS, {})
+    owner, owned = owners.setdefault(str(path).casefold(), (nodeid, path))
+    if owner != nodeid:
+        spelled = "" if owned == path else f" (as {owned.name})"
+        pytest.fail(
+            f"{nodeid} cannot use the cassette {path}: {owner} already uses it{spelled}. A "
+            "cassette holds the traffic of one test, so give one of them its own name with "
+            "@pytest.mark.llm_cassette(name=...); file names are compared case-insensitively.",
+            pytrace=False,
+        )
 
 
 def _secrets_from_env(config: pytest.Config) -> tuple[str, ...]:
@@ -287,11 +322,13 @@ def llm_cassette(
 ) -> Iterator[Cassette]:
     """A :class:`~llm_cassette.Cassette` for the current test, saved when the test finishes.
 
-    The cassette path is derived from the test's node id (see :func:`cassette_path`). If the
-    code under test swallowed an :class:`~llm_cassette.UnmatchedRequestError` (SDKs wrap
-    transport errors), the test still fails at teardown.
+    The cassette path is derived from the test's node id (see :func:`cassette_path`) and must not
+    be shared with another test. If the code under test swallowed an
+    :class:`~llm_cassette.UnmatchedRequestError` (SDKs wrap transport errors), the test still
+    fails at teardown.
     """
     options = _resolve(request, llm_cassette_config)
+    _claim(request.config, options.path, request.node.nodeid)
     cassette = Cassette(
         options.path,
         mode=options.mode,
