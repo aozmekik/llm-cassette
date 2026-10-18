@@ -9,16 +9,7 @@ from collections.abc import Callable, Iterable, Iterator, Sequence
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field, replace
 from functools import cache
-from urllib.parse import (
-    parse_qsl,
-    quote,
-    quote_plus,
-    unquote,
-    unquote_plus,
-    urlencode,
-    urlsplit,
-    urlunsplit,
-)
+from urllib.parse import quote, quote_plus, unquote, unquote_plus, urlsplit, urlunsplit
 
 from llm_cassette._json import JSONValue, canonical, is_json_scalar, parse_document
 from llm_cassette._model import (
@@ -111,6 +102,32 @@ def _strings(values: Sequence[str], *, argument: str) -> tuple[str, ...]:
         msg = f"{argument} must be a sequence of strings, not a single string: use [{values!r}]"
         raise TypeError(msg)
     return tuple(values)
+
+
+def _hex_escape(byte: int) -> str:
+    """A pattern for the percent-escape of ``byte`` in either hex case."""
+    return "%" + "".join(
+        f"[{digit.lower()}{digit}]" if digit.isalpha() else digit for digit in f"{byte:02X}"
+    )
+
+
+@cache
+def _url_pattern(secret: str) -> re.Pattern[str]:
+    """A pattern for ``secret`` in percent-encoded text, however much of it was escaped.
+
+    Clients differ in which characters they escape (httpx keeps ``+``, ``/`` and ``=`` in a query
+    but escapes a space; ``urlencode`` escapes all three and writes a space as ``+``), so each
+    character matches the escapes of its UTF-8 bytes, in either hex case, or itself, and a space
+    also matches ``+``. The escapes come first, so a secret ending in ``%`` takes the ``%25`` of
+    an escaped one with it.
+    """
+    alternatives = []
+    for char in secret:
+        forms = ["".join(_hex_escape(byte) for byte in char.encode()), re.escape(char)]
+        if char == " ":
+            forms.append(r"\+")
+        alternatives.append(f"(?:{'|'.join(forms)})")
+    return re.compile("".join(alternatives))
 
 
 def _replacements(secrets: Sequence[str], placeholder: str) -> tuple[tuple[str, str], ...]:
@@ -214,11 +231,12 @@ class Redaction:
             closed half-way) is replaced by the placeholder as a whole, because the paths cannot
             be located in it.
         secrets: Literal values (for example the API key itself) replaced anywhere in URLs,
-            headers and bodies, including their JSON-escaped and percent-encoded forms. Before a
-            cassette is written, :meth:`~llm_cassette.Cassette.save` also looks for them in
-            percent-decoded text, in decoded JSON strings and in the serialized file (see
-            :meth:`find_secret`); if one survived (for instance split across two streamed
-            chunks), it refuses to write and raises :class:`~llm_cassette.SecretLeakError`.
+            headers and bodies, including their JSON-escaped and percent-encoded forms; in URLs,
+            however much of the value was percent-encoded. Before a cassette is written,
+            :meth:`~llm_cassette.Cassette.save` also looks for them in percent-decoded text, in
+            decoded JSON strings and in the serialized file (see :meth:`find_secret`); if one
+            survived (for instance split across two streamed chunks), it refuses to write and
+            raises :class:`~llm_cassette.SecretLeakError`.
         drop_headers: Header names, or :mod:`fnmatch` patterns such as ``"x-stainless-*"``, removed
             from requests and responses altogether (case-insensitive). Dropping volatile headers
             such as ``user-agent`` keeps re-recorded cassettes from changing with the SDK, OS or
@@ -237,6 +255,7 @@ class Redaction:
     _byte_replacements: tuple[tuple[bytes, bytes], ...] = field(
         init=False, repr=False, compare=False
     )
+    _url_patterns: tuple[re.Pattern[str], ...] = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         """Validate the configuration and normalize names to lower case."""
@@ -260,8 +279,9 @@ class Redaction:
         if any(not secret for secret in secrets):
             msg = "secrets must be non-empty strings"
             raise ValueError(msg)
-        if any(secret in self.placeholder for secret in secrets):
-            msg = "the placeholder must not contain a secret"
+        placeholder_forms = {encode(self.placeholder) for encode in _ENCODINGS}
+        if any(secret in form for secret in secrets for form in placeholder_forms):
+            msg = "the placeholder must not contain a secret, in any of its encoded forms"
             raise ValueError(msg)
         object.__setattr__(self, "secrets", secrets)
         text = _replacements(secrets, self.placeholder)
@@ -269,6 +289,8 @@ class Redaction:
         object.__setattr__(
             self, "_byte_replacements", tuple((a.encode(), b.encode()) for a, b in text)
         )
+        longest_first = sorted(set(secrets), key=len, reverse=True)
+        object.__setattr__(self, "_url_patterns", tuple(map(_url_pattern, longest_first)))
 
     def is_sensitive_header(self, name: str) -> bool:
         """Return whether the value of header ``name`` is replaced under this configuration."""
@@ -449,21 +471,37 @@ class Redaction:
         return self._replace_secrets_header(value)
 
     def _redact_url(self, url: str) -> str:
+        # Secrets go first: they may hold characters such as "?" or "&" that change how the
+        # rest of the URL splits into its parts.
+        url = self._replace_secrets_url(url)
         try:
             parts = urlsplit(url)
         except ValueError:  # not a URL after all (a malformed location header, say)
-            return self._replace_secrets_text(url)
+            return url
         netloc = _redact_userinfo(parts.netloc, quote(self.placeholder, safe=""))
-        query = parts.query
-        pairs = parse_qsl(query, keep_blank_values=True)
-        if any(self.is_sensitive_query_param(name) for name, _ in pairs):
-            query = urlencode(
-                [
-                    (name, self.placeholder if self.is_sensitive_query_param(name) else value)
-                    for name, value in pairs
-                ]
-            )
-        rebuilt = urlunsplit((parts.scheme, netloc, parts.path, query, parts.fragment))
-        return self._replace_secrets_text(
-            rebuilt if (netloc, query) != (parts.netloc, parts.query) else url
-        )
+        query = self._redact_query(parts.query)
+        if (netloc, query) == (parts.netloc, parts.query):
+            return url
+        return urlunsplit((parts.scheme, netloc, parts.path, query, parts.fragment))
+
+    def _redact_query(self, query: str) -> str:
+        """``query`` with the values of its sensitive parameters replaced.
+
+        Every other parameter is kept exactly as the client encoded it: decoding and re-encoding
+        the query would change how the rest of it is escaped, for no gain.
+        """
+        placeholder = quote_plus(self.placeholder)
+        pairs = query.split("&")
+        for index, pair in enumerate(pairs):
+            name = pair.partition("=")[0]
+            if pair and self.is_sensitive_query_param(unquote_plus(name)):
+                pairs[index] = f"{name}={placeholder}"
+        return "&".join(pairs)
+
+    def _replace_secrets_url(self, url: str) -> str:
+        """Replace the secrets in ``url``, however much of each one was percent-encoded."""
+        # quote() leaves no backslash, so the placeholder is a literal re.sub replacement.
+        placeholder = quote(self.placeholder, safe="")
+        for pattern in self._url_patterns:
+            url = pattern.sub(placeholder, url)
+        return url

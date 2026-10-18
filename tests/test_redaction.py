@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
-from urllib.parse import quote, quote_plus
+from urllib.parse import quote, quote_plus, unquote, unquote_plus
 
 import httpx2
 import pytest
@@ -140,6 +140,84 @@ def test_the_referer_request_header_is_redacted() -> None:
 def test_urls_without_sensitive_parts_are_untouched() -> None:
     url = "https://api.example.com/v1/x?b=%20&a=1"
     assert Redaction().redact_request(request(url=url)).url == url
+
+
+def test_other_query_parameters_keep_the_encoding_the_client_chose() -> None:
+    url = "https://api.example.com/v1/x?b=%20&a=1+2&&api%5Fkey=k1&c=%7e&token&d=x=y"
+    assert Redaction().redact_request(request(url=url)).url == (
+        "https://api.example.com/v1/x?b=%20&a=1+2&&api%5Fkey=REDACTED&c=%7e&token=REDACTED&d=x=y"
+    )
+
+
+B64_SECRET = "Zm9vYmFy+YmF6/cXV4=="  # base64 text: holds +, / and =
+
+
+@pytest.mark.parametrize(
+    "encoded",
+    [
+        B64_SECRET,  # as typed into the URL; httpx sends it like this
+        quote(B64_SECRET),
+        quote(B64_SECRET, safe=""),
+        quote_plus(B64_SECRET),
+        "Zm9vYmFy+YmF6%2FcXV4%3D%3D",  # + kept, / and = escaped
+        "Zm9vYmFy%2bYmF6%2fcXV4%3d%3d",  # lower-case hex
+        "%5Am9vYmFy+YmF6/cXV4==",  # an unreserved character escaped
+    ],
+)
+@pytest.mark.parametrize(
+    ("sensitive", "stored"), [("", ""), ("api_key=k&", f"api_key={R}&")], ids=["alone", "api-key"]
+)
+def test_a_secret_in_a_url_is_replaced_however_it_was_percent_encoded(
+    encoded: str, sensitive: str, stored: str
+) -> None:
+    redaction = Redaction(secrets=[B64_SECRET])
+    url = f"https://api.example.com/v1/{encoded}/x?{sensitive}q={encoded}#{encoded}"
+    redacted = redaction.redact_request(request(url=url))
+    assert redacted.url == f"https://api.example.com/v1/{R}/x?{stored}q={R}#{R}"
+    assert redaction.find_secret([Interaction(redacted, RecordedResponse(200))]) is None
+
+
+def test_a_secret_ending_in_a_percent_sign_takes_its_whole_escape() -> None:
+    redaction = Redaction(secrets=["0000000%"])
+    url = f"https://api.example.com/{quote('0000000%')}?q={quote_plus('0000000%')}&r=0000000%"
+    assert (
+        redaction.redact_request(request(url=url)).url == f"https://api.example.com/{R}?q={R}&r={R}"
+    )
+
+
+@pytest.mark.parametrize(
+    ("secret", "sent"),
+    [
+        ("a+b c/d=e-0001", "a+b%20c/d=e-0001"),  # a space is escaped, + / = are not
+        ("pässwörd+1/2", "p%C3%A4ssw%C3%B6rd+1/2"),  # so are non-ASCII characters
+        ("100%-sure-0001", "100%-sure-0001"),  # a % that starts no escape is kept
+    ],
+)
+def test_secrets_in_raw_urls_are_replaced_in_the_form_httpx_sends(
+    tmp_path: Path, secret: str, sent: str
+) -> None:
+    wire: list[str] = []
+
+    def upstream(incoming: httpx2.Request) -> httpx2.Response:
+        wire.append(str(incoming.url))
+        return httpx2.Response(200, json={})
+
+    path = tmp_path / "c.yaml"
+    with Cassette(path, mode="record", redaction=Redaction(secrets=[secret])) as cassette:
+        client = httpx2.Client(
+            transport=CassetteTransport(cassette, httpx2.MockTransport(upstream))
+        )
+        client.get(f"https://x.example.com/v1/{secret}?q={secret}")
+        client.get(f"https://x.example.com/v1/x?api_key=k&q={secret}")
+    assert wire == [
+        f"https://x.example.com/v1/{sent}?q={sent}",
+        f"https://x.example.com/v1/x?api_key=k&q={sent}",
+    ]
+    text = path.read_text(encoding="utf-8")
+    assert "url: https://x.example.com/v1/REDACTED?q=REDACTED" in text
+    assert "url: https://x.example.com/v1/x?api_key=REDACTED&q=REDACTED" in text
+    for view in (text, unquote(text), unquote_plus(text)):
+        assert secret not in view
 
 
 def test_request_body_paths() -> None:
@@ -297,13 +375,14 @@ def test_escaped_secrets_never_reach_the_file(tmp_path: Path) -> None:
         client.post("https://x.example.com/", json={"password": secret})
         client.post("https://x.example.com/", params={"sig": secret}, data={"assertion": secret})
         client.get(f"https://x.example.com/files/{quote(secret, safe='')}")
+        client.get(f"https://x.example.com/files/{secret}?api_key=k&q={secret}")  # httpx escapes
     text = path.read_text(encoding="utf-8")
     for form in (secret, quote_plus(secret), quote(secret, safe=""), json.dumps(secret)[1:-1]):
         assert form not in text
-    assert text.count("REDACTED") >= 6
-
-
-B64_SECRET = "Zm9vYmFy+YmF6/cXV4=="  # base64 text: holds +, / and =
+    for view in (unquote(text), unquote_plus(text)):
+        assert secret not in view
+    assert "url: https://x.example.com/files/REDACTED?api_key=REDACTED&q=REDACTED" in text
+    assert text.count("REDACTED") >= 9
 
 
 @pytest.mark.parametrize(
@@ -326,13 +405,6 @@ def test_find_secret_decodes_bodies_redaction_leaves_alone(form: str) -> None:
 def test_find_secret_looks_inside_decoded_views() -> None:
     secret = "Zm9v+YmFy/YmF6="
     redaction = Redaction(secrets=[secret])
-    # Lower-case percent escapes are valid, but not one of the forms that are replaced.
-    lower_case_hex = re.sub(r"%[0-9A-F]{2}", lambda m: m.group().lower(), quote_plus(secret))
-    leaked = Interaction(
-        request(url=f"https://x.example.com/?q={lower_case_hex}"), RecordedResponse(200)
-    )
-    assert redaction.redact(leaked).request.url.endswith(lower_case_hex)
-    assert redaction.find_secret([redaction.redact(leaked)]) == "interactions[0].request.url"
     split = '{"a": "Zm9v\\u002BYmFy", "b": "/YmF6="}'
     stream = RecordedResponse(200, (), (Chunk(b'data: {"echo": "Zm9v\\u002BYmFy/YmF6="}\n\n'),))
     assert (
@@ -394,6 +466,7 @@ def test_find_secret_catches_a_secret_split_across_chunks() -> None:
     [
         ({"secrets": [""]}, ValueError, "non-empty strings"),
         ({"secrets": ["RED"]}, ValueError, "must not contain a secret"),
+        ({"secrets": ["%3Cred"], "placeholder": "<red>"}, ValueError, "encoded forms"),
         ({"placeholder": "a\nb"}, ValueError, "valid header value"),
         ({"placeholder": "REDACTED\t"}, ValueError, "printable ASCII"),
         ({"placeholder": "gizlendi—"}, ValueError, "printable ASCII"),
@@ -473,6 +546,43 @@ def test_redaction_is_idempotent_and_leaves_no_secret(secret: str) -> None:
     assert redaction.redact(once) == once
     assert redaction.find_secret([once]) is None
     assert once.request.url == perfect.request.url
+
+
+#: Characters a query value can hold unescaped without changing the URL's structure.
+_LITERAL_IN_QUERY = frozenset("-._~!$'()*+,;=:@/?")
+
+
+@given(secret_texts, st.data())
+def test_a_secret_in_a_url_never_survives_in_any_mix_of_escapes(
+    secret: str, data: st.DataObject
+) -> None:
+    """Each character of the secret is sent as itself or escaped, in either hex case."""
+    assume(secret not in R)
+    redaction = Redaction(secrets=[secret])
+    sensitive = data.draw(st.sampled_from(["", "api_key=k&"]), label="sensitive")
+    template = "https://api.example.com/v1/{}/x?" + sensitive + "q={}"
+    perfect = template.format(R, R).replace("=k&", f"={R}&")
+    assume(not any(secret in view for view in (perfect, unquote(perfect), unquote_plus(perfect))))
+
+    def encoded() -> str:
+        sent = []
+        for char in secret:
+            literal = char.isalnum() or char in _LITERAL_IN_QUERY
+            if literal and data.draw(st.booleans()):
+                sent.append(char)
+            elif char == " " and data.draw(st.booleans()):
+                sent.append("+")
+            else:
+                escapes = quote(char, safe="")
+                sent.append(escapes.lower() if data.draw(st.booleans()) else escapes)
+        return "".join(sent)
+
+    url = template.format(encoded(), encoded())
+    once = redaction.redact_request(request(url=url))
+    for view in (once.url, unquote(once.url), unquote_plus(once.url)):
+        assert secret not in view
+    assert redaction.find_secret([Interaction(once, RecordedResponse(200))]) is None
+    assert redaction.redact_request(once) == once
 
 
 @pytest.mark.parametrize(
