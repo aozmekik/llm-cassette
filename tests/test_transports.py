@@ -414,11 +414,69 @@ def test_a_default_upstream_is_created_lazily_when_recording(
 ) -> None:
     transport = lib.adapter.CassetteTransport(Cassette(cassette_path, mode="record"))
     assert transport._transport is None
-    assert isinstance(transport._upstream(), lib.http.HTTPTransport)
+    upstream = transport._upstream()
+    assert isinstance(upstream, lib.adapter._ClientTransport)
+    assert isinstance(upstream.client, lib.http.Client)
     transport.close()
+    assert upstream.client.is_closed
     async_transport = lib.adapter.AsyncCassetteTransport(Cassette(cassette_path, mode="record"))
-    assert isinstance(async_transport._upstream(), lib.http.AsyncHTTPTransport)
+    async_upstream = async_transport._upstream()
+    assert isinstance(async_upstream, lib.adapter._AsyncClientTransport)
     anyio.run(async_transport.aclose)
+    assert async_upstream.client.is_closed
+
+
+def test_the_default_upstream_honours_proxy_variables(
+    lib: HttpLib, cassette_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Recording behind a corporate proxy works like the SDKs' own clients do."""
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.invalid:3128")
+    monkeypatch.setenv("NO_PROXY", "internal.example.com")
+    for kind in ("CassetteTransport", "AsyncCassetteTransport"):
+        transport = getattr(lib.adapter, kind)(Cassette(cassette_path, mode="record"))
+        client = transport._upstream().client
+        proxied = client._transport_for_url(lib.http.URL("https://api.openai.com/v1/models"))
+        direct = client._transport_for_url(lib.http.URL("https://internal.example.com/x"))
+        assert proxied is not client._transport, "HTTPS_PROXY routes through the proxy"
+        assert direct is client._transport, "NO_PROXY hosts go direct"
+
+
+def test_the_default_upstream_sends_requests_unchanged(lib: HttpLib, cassette_path: Path) -> None:
+    seen: list[Any] = []
+
+    def handler(request: Any) -> Any:
+        seen.append(request)
+        return lib.http.Response(200, stream=lib.stream([b"a", b"b"]))
+
+    upstream = lib.adapter._ClientTransport()
+    upstream.client = lib.http.Client(transport=lib.http.MockTransport(handler))
+    with Cassette(cassette_path, mode="record") as cassette:
+        client = lib.http.Client(
+            transport=lib.adapter.CassetteTransport(cassette, upstream), auth=("client", "auth")
+        )
+        with client.stream("GET", "https://user:pw@api.example.com/x") as response:
+            assert list(response.iter_bytes()) == [b"a", b"b"]
+        (interaction,) = cassette.interactions
+    assert interaction.response.complete
+    expected = lib.http.BasicAuth("client", "auth").auth_flow(lib.http.Request("GET", URL))
+    assert seen[0].headers["authorization"] == next(expected).headers["authorization"], (
+        "the URL's user info does not override the outer client's authentication"
+    )
+
+
+@pytest.mark.anyio
+async def test_the_default_async_upstream_sends_requests(lib: HttpLib, cassette_path: Path) -> None:
+    upstream = lib.adapter._AsyncClientTransport()
+    upstream.client = lib.http.AsyncClient(
+        transport=lib.http.MockTransport(lambda _: lib.http.Response(200, text="ok"))
+    )
+    with Cassette(cassette_path, mode="record") as cassette:
+        client = lib.http.AsyncClient(
+            transport=lib.adapter.AsyncCassetteTransport(cassette, upstream)
+        )
+        assert (await client.get(URL)).text == "ok"
+        await client.aclose()
+    assert upstream.client.is_closed
 
 
 @pytest.mark.parametrize(

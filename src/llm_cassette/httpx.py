@@ -144,13 +144,48 @@ class _AsyncRecordingStream(httpx.AsyncByteStream):
         await self._upstream.aclose()
 
 
+class _ClientTransport(httpx.BaseTransport):
+    """Sends requests the way a default ``httpx.Client()`` would.
+
+    A client given an explicit transport ignores the proxy environment variables, so the default
+    upstream wraps a client instead of a bare ``HTTPTransport``: recording then honours
+    ``HTTP_PROXY``, ``HTTPS_PROXY``, ``ALL_PROXY``, ``NO_PROXY`` and ``SSL_CERT_FILE`` like the SDKs
+    do when they build their own client.
+    """
+
+    def __init__(self) -> None:
+        self.client = httpx.Client()
+
+    def handle_request(self, request: httpx.Request) -> httpx.Response:
+        # The no-op Auth stops the inner client from deriving credentials from the URL a second
+        # time: the outer client has already applied its own authentication.
+        return self.client.send(request, stream=True, auth=httpx.Auth())
+
+    def close(self) -> None:
+        self.client.close()
+
+
+class _AsyncClientTransport(httpx.AsyncBaseTransport):
+    """The asynchronous counterpart of :class:`_ClientTransport`."""
+
+    def __init__(self) -> None:
+        self.client = httpx.AsyncClient()
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        return await self.client.send(request, stream=True, auth=httpx.Auth())
+
+    async def aclose(self) -> None:
+        await self.client.aclose()
+
+
 class CassetteTransport(httpx.BaseTransport):
     """An httpx transport that replays requests from a cassette or records them into it.
 
-    In recording mode, requests are forwarded to ``transport`` (an ``httpx.HTTPTransport`` by
-    default, created on first use) and the decoded response is recorded chunk by chunk while it
-    streams to the client. Otherwise responses come from the cassette and ``transport`` is never
-    used. Closing this transport closes the wrapped one.
+    In recording mode, requests are forwarded to ``transport`` and the decoded response is
+    recorded chunk by chunk while it streams to the client. Without ``transport``, requests go
+    out the way a default ``httpx.Client()`` sends them, proxy environment variables included.
+    Otherwise responses come from the cassette and ``transport`` is never used. Closing this
+    transport closes the wrapped one.
 
     Args:
         cassette: Where interactions are read from and recorded into.
@@ -167,7 +202,7 @@ class CassetteTransport(httpx.BaseTransport):
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
-        """Wrap ``transport`` (or a default ``httpx.HTTPTransport``) with ``cassette``."""
+        """Wrap ``transport`` (or the network, see above) with ``cassette``."""
         self._cassette = cassette
         self._transport = transport
         self._clock = clock
@@ -218,7 +253,7 @@ class CassetteTransport(httpx.BaseTransport):
 
     def _upstream(self) -> httpx.BaseTransport:
         if self._transport is None:
-            self._transport = httpx.HTTPTransport()
+            self._transport = _ClientTransport()
         return self._transport
 
 
@@ -227,8 +262,8 @@ class AsyncCassetteTransport(httpx.AsyncBaseTransport):
 
     Args:
         cassette: Where interactions are read from and recorded into.
-        transport: The real transport to record through; defaults to
-            ``httpx.AsyncHTTPTransport``, created on first use.
+        transport: The real transport to record through; by default, requests go out the way a
+            default ``httpx.AsyncClient()`` sends them, proxy environment variables included.
         clock: Monotonic clock in seconds, used to measure recorded delays.
         sleep: Awaited with the (scaled) delay in seconds before replayed chunks; defaults to
             :func:`anyio.sleep`, so asyncio and trio both work.
@@ -242,7 +277,7 @@ class AsyncCassetteTransport(httpx.AsyncBaseTransport):
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], Awaitable[None]] = anyio.sleep,
     ) -> None:
-        """Wrap ``transport`` (or a default ``httpx.AsyncHTTPTransport``) with ``cassette``."""
+        """Wrap ``transport`` (or the network, see above) with ``cassette``."""
         self._cassette = cassette
         self._transport = transport
         self._clock = clock
@@ -296,5 +331,5 @@ class AsyncCassetteTransport(httpx.AsyncBaseTransport):
 
     def _upstream(self) -> httpx.AsyncBaseTransport:
         if self._transport is None:
-            self._transport = httpx.AsyncHTTPTransport()
+            self._transport = _AsyncClientTransport()
         return self._transport
