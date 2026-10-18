@@ -425,12 +425,12 @@ same for one or a thousand recorded interactions; the full comparison only runs 
 | pytest | `pytest` 8.3.0 and 9.1.1, `pytest-xdist` 3.6.1 and 3.8.0 |
 
 The lowest versions come from installing with `uv pip install --resolution lowest-direct -e .
---group dev` and running the full suite (444 tests passed on Python 3.11.16 and 3.12.15); CI
+--group dev` and running the full suite (446 tests passed on Python 3.11.16 and 3.12.15); CI
 repeats this on Python 3.11. Windows is not tested yet.
 
 ## Testing
 
-The suite has 444 tests and 100% line and branch coverage of `src/` (1728 statements, 434 branches),
+The suite has 446 tests and 100% line and branch coverage of `src/` (1728 statements, 434 branches),
 from `uv run coverage run -m pytest && uv run coverage report` in a fresh clone on an Apple M1 Pro
 with 16 GB, macOS 26, with the same result on Python 3.14.5, 3.11.16, 3.12.15 and 3.13.2. No test
 calls a real API: fake upstreams built on `httpx2.MockTransport` follow the documented OpenAI Chat
