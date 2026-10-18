@@ -28,10 +28,11 @@ releases may contain breaking changes.
   closest recorded request.
 - Redaction of sensitive headers (by name and by `key`/`token`/`secret` substrings), query
   parameters and user info in the request URL and in URL-valued headers, JSON body paths, and
-  literal secret values in their plain, JSON-escaped and percent-encoded forms, applied before
-  anything is matched, exposed or written; `content-length` follows a redacted body;
-  `drop_headers` removes volatile headers; `SecretLeakError` if a secret survives, checked on
-  decoded views and on the serialized file.
+  literal secret values in their plain, JSON-escaped and percent-encoded forms (in URLs, any mix
+  of escaped and literal characters), applied before anything is matched, exposed or written;
+  `content-length` follows a redacted body; `drop_headers` removes volatile headers;
+  `SecretLeakError` if a secret can still be found as is, percent-decoded or JSON-unescaped,
+  checked on every field and on the serialized file.
 - Cassette file format version 1 in YAML (default) or JSON, with deterministic output.
 - pytest plugin: `llm_cassette` fixture, `@pytest.mark.llm_cassette` marker,
   `llm_cassette_config` fixture for project defaults, `--llm-record-mode`, ini options, cassette

@@ -38,7 +38,8 @@ as a cassette diff.
   any header or query parameter whose name contains `key`, `token` or `secret` (in the request
   URL and in `location`-style headers), URL user info, JSON body paths, and literal secret values,
   including their JSON-escaped and percent-encoded forms. A final check refuses to write a
-  cassette in which a secret survived.
+  cassette in which a configured secret can still be found as is, percent-decoded or
+  JSON-unescaped.
 - **Readable, deterministic cassettes**: one YAML (or JSON) file per test, schema-versioned, sorted
   keys and headers, decoded bodies, multi-line strings as literal blocks.
 - **pytest plugin**: `llm_cassette` fixture, `@pytest.mark.llm_cassette(...)`,
@@ -241,16 +242,23 @@ cassette exposes or writes it:
 
 - Query parameters and user info (`https://TOKEN@host`, `user:pass@`) are redacted in the request
   URL and in the URL-valued headers `location`, `content-location`, `link` and `referer`, so a
-  redirect to a presigned download link does not keep its token.
+  redirect to a presigned download link does not keep its token. The rest of the URL is kept as
+  the client encoded it.
 - Body paths apply to JSON request bodies and to non-streaming JSON responses. A JSON response
   that does not parse (for example one the client closed half-way) is replaced by the placeholder
   as a whole, because the paths cannot be located in it.
 - `secrets` are replaced as is, JSON-escaped (`\u00e4`, `\"`) and percent-encoded (`%2B`, `+`).
-  Before writing, the cassette also searches decoded JSON strings, percent-decoded text and the
-  serialized file, and raises `SecretLeakError` if a secret is still there (for example split
-  across two streamed chunks). The check errs on the side of safety: a secret that also occurs in
-  text redaction keeps, such as a header name, fails it too. The pytest plugin adds the values of
-  `OPENAI_API_KEY` and `ANTHROPIC_API_KEY` (configurable with `llm_secret_env`).
+  In URLs they are found however much of them was percent-encoded: clients differ there
+  (httpx sends `a+b c/d` as `a+b%20c/d`, `urlencode` as `a%2Bb+c%2Fd`), so any mix of escaped and
+  literal characters, in either hex case, is recognized.
+- Before writing, the cassette searches every field and the serialized file as is,
+  percent-decoded (with `+` read both as `+` and as a space) and with JSON string escapes decoded,
+  these decodings applied on top of each other up to four levels deep, and raises
+  `SecretLeakError` if a secret is still there (for example split across two streamed chunks).
+  A secret transformed in any other way, such as base64-encoded or hashed, is not recognized. The
+  check errs on the side of safety: a secret that also occurs in text redaction keeps, such as a
+  header name, fails it too. The pytest plugin adds the values of `OPENAI_API_KEY` and
+  `ANTHROPIC_API_KEY` (configurable with `llm_secret_env`).
 - When redaction changes a response body, `content-length` is adjusted to match.
 - `drop_headers` keeps headers that change with the SDK, OS or Python version out of the
   cassette, so re-recording on another machine gives a clean diff. Nothing is dropped by default.
@@ -442,7 +450,8 @@ credentials. The tests record through them and replay with the real `openai` and
 clients, sync and async, including streams cut short by an early `break`, Ctrl-C and cancellation.
 Property-based tests (Hypothesis) round-trip arbitrary JSON, text and bytes through the cassette
 format, check the SSE parser and the path rewriter, and check that redaction is idempotent and
-leaves no encoded secret behind. The Python examples in this README are compiled and checked with
+leaves no encoded secret behind, including in URLs where each character of the secret is sent
+literally or escaped at random. The Python examples in this README are compiled and checked with
 ruff's pyflakes rules (`tests/test_readme.py`).
 
 ## Benchmarks

@@ -46,8 +46,9 @@ Questions and the options considered:
   those characters into line breaks or spaces in any other scalar style. Property tests round-trip
   arbitrary text, bytes and JSON documents through the format.
 - Redaction runs before an interaction is matched, exposed or written, and a final scan refuses to
-  write a file that still contains a configured secret, also in decoded JSON strings,
-  percent-decoded text and the serialized file itself.
+  write a file that still contains a configured secret, searching each field and the serialized
+  file as is, percent-decoded and with JSON string escapes decoded (nested up to four levels). It
+  recognizes those encodings only, not, say, a base64-encoded secret.
 - JSON numbers that do not fit in a float (`1e400`) make a body opaque text rather than JSON, so
   a cassette that can be written can always be read back.
 
