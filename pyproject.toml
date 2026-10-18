@@ -53,6 +53,7 @@ dev = [
   "mypy>=1.15",
   "openai>=3.0",
   "pytest>=8.3",
+  "pytest-xdist>=3.6",
   "ruff>=0.15",
   "types-pyyaml>=6.0.12",
 ]

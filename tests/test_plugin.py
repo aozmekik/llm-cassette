@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import re
 from pathlib import Path
@@ -15,7 +16,14 @@ import pytest
 import llm_cassette.clients  # noqa: F401
 import tests.fakes  # noqa: F401
 from llm_cassette import Cassette
-from llm_cassette.pytest_plugin import _safe_filename, render_usage_report
+from llm_cassette.pytest_plugin import (
+    _USAGE_LOG,
+    _safe_filename,
+    _UsageLog,
+    pytest_sessionfinish,
+    pytest_testnodedown,
+    render_usage_report,
+)
 from llm_cassette.usage import PriceTable, Usage
 
 CONFTEST = """
@@ -458,6 +466,79 @@ def test_usage_report_with_prices(project: pytest.Pytester) -> None:
     result.stdout.fnmatch_lines(
         ["*cost USD", "test_demo.py::test_chat * 0.000016", "total * 0.000016"]
     )
+
+
+XDIST_TESTS = """
+import httpx2
+import pytest
+from llm_cassette.httpx2 import CassetteTransport
+
+
+def completion(request):
+    usage = {"prompt_tokens": 7, "completion_tokens": 2}
+    body = {"object": "chat.completion", "model": "gpt-x", "choices": [], "usage": usage}
+    return httpx2.Response(200, json=body)
+
+
+@pytest.mark.parametrize("n", range(4))
+def test_chat(llm_cassette, n):
+    transport = CassetteTransport(llm_cassette, httpx2.MockTransport(completion))
+    client = httpx2.Client(transport=transport)
+    client.post("https://api.example.com/v1/chat/completions", json={"model": "gpt-x", "n": n})
+"""
+
+
+def test_usage_report_under_xdist(pytester: pytest.Pytester) -> None:
+    """Workers send their usage to the controller, which reports the whole session."""
+    pytester.makepyfile(test_xdist=XDIST_TESTS)
+    result = pytester.runpytest("-p", "xdist", "-n", "2", "--llm-usage-report")
+    result.assert_outcomes(passed=4)
+    result.stdout.fnmatch_lines(
+        [
+            "*= llm-cassette usage =*",
+            "test_xdist.py::test_chat[[]0[]] * gpt-x * 1 * 7 * 0 * 0 * 2",
+            "test_xdist.py::test_chat[[]3[]] * gpt-x * 1 * 7 * 0 * 0 * 2",
+            "total * 4 * 28 * 0 * 0 * 8",
+        ]
+    )
+
+
+def test_a_worker_exports_its_usage() -> None:
+    class Config:
+        stash = pytest.Stash()
+        workeroutput: dict[str, object] = {}  # noqa: RUF012 - mirrors xdist's attribute
+
+    class Session:
+        config = Config()
+
+    log = _UsageLog(enabled=False, prices=None)
+    log.tests["t.py::a"] = [Usage("anthropic", "m", output_tokens=2)]
+    Session.config.stash[_USAGE_LOG] = log
+    pytest_sessionfinish(Session())  # type: ignore[arg-type]
+    exported = Session.config.workeroutput["llm_cassette_usage"]
+    assert exported == {"t.py::a": [dataclasses.asdict(Usage("anthropic", "m", output_tokens=2))]}
+
+
+def test_a_worker_reported_twice_is_merged_once() -> None:
+    """The xdist controller reports a worker that went down with an error a second time."""
+
+    class Node:
+        def __init__(self, config: object) -> None:
+            self.config = config
+            exported = {"t.py::a": [dataclasses.asdict(Usage("openai", "m", input_tokens=3))]}
+            self.workeroutput: dict[str, object] = {"llm_cassette_usage": exported}
+
+    class Config:
+        stash = pytest.Stash()
+
+    config = Config()
+    log = _UsageLog(enabled=True, prices=None)
+    config.stash[_USAGE_LOG] = log
+    node = Node(config)
+    pytest_testnodedown(node, None)
+    pytest_testnodedown(node, "crashed")
+    assert log.tests == {"t.py::a": [Usage("openai", "m", input_tokens=3)]}
+    pytest_testnodedown(object(), None)  # a node without output or config is ignored
 
 
 def test_invalid_price_table_is_a_usage_error(pytester: pytest.Pytester) -> None:

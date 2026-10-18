@@ -10,20 +10,24 @@ Options, from lowest to highest precedence:
 3. ``@pytest.mark.llm_cassette(...)`` markers (module, then class, then function); an option
    given as ``None`` counts as not given;
 4. ``--llm-record-mode`` on the command line, which always wins so that CI can force ``none``.
+
+Under pytest-xdist, each worker sends the usage it saw to the controller, which prints one
+report for the whole session.
 """
 
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import hashlib
 import math
 import os
 import re
-from collections.abc import Generator, Iterable, Iterator
+from collections.abc import Generator, Iterable, Iterator, Mapping
 from dataclasses import dataclass, field, replace
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, TypedDict, TypeVar
+from typing import Any, TypedDict, TypeVar, cast
 
 import pytest
 
@@ -60,6 +64,7 @@ _UNSAFE_FILENAME_CHARS = re.compile(r"[^A-Za-z0-9_.\-\[\]]+")
 _MAX_FILENAME = 120
 _DIGEST_LENGTH = 8
 _MIN_SECRET_LENGTH = 8
+_WORKER_USAGE = "llm_cassette_usage"  # key in pytest-xdist's workeroutput
 
 _PHASE_REPORTS = pytest.StashKey[dict[str, pytest.TestReport]]()
 # Which test owns each cassette file in this session, keyed by the case-folded path.
@@ -120,6 +125,18 @@ class _UsageLog:
         if usages:
             self.tests.setdefault(nodeid, []).extend(usages)
 
+    def export(self) -> dict[str, list[dict[str, object]]]:
+        """The log as plain data, which pytest-xdist can send from a worker to the controller."""
+        return {
+            nodeid: [dataclasses.asdict(usage) for usage in usages]
+            for nodeid, usages in self.tests.items()
+        }
+
+    def merge(self, exported: Mapping[str, list[dict[str, Any]]]) -> None:
+        """Add the usage that a worker exported."""
+        for nodeid, usages in exported.items():
+            self.tests.setdefault(nodeid, []).extend(Usage(**usage) for usage in usages)
+
 
 _USAGE_LOG = pytest.StashKey[_UsageLog]()
 
@@ -150,6 +167,27 @@ def pytest_configure(config: pytest.Config) -> None:
             raise pytest.UsageError(msg) from None
     enabled = bool(config.getoption("llm_usage_report")) or prices is not None
     config.stash[_USAGE_LOG] = _UsageLog(enabled=enabled, prices=prices)
+
+
+def pytest_sessionfinish(session: pytest.Session) -> None:
+    """On a pytest-xdist worker, hand the usage this worker saw to the controller."""
+    workeroutput: dict[str, object] | None = getattr(session.config, "workeroutput", None)
+    log = session.config.stash.get(_USAGE_LOG, None)
+    if workeroutput is not None and log is not None:
+        workeroutput[_WORKER_USAGE] = log.export()
+
+
+@pytest.hookimpl(optionalhook=True)
+def pytest_testnodedown(node: object, error: object) -> None:
+    """On the pytest-xdist controller, merge the usage a finished worker sent."""
+    del error
+    workeroutput: dict[str, object] = getattr(node, "workeroutput", {})
+    # pop: xdist calls this hook a second time for a worker that went down with an error.
+    exported = workeroutput.pop(_WORKER_USAGE, None)
+    config: pytest.Config | None = getattr(node, "config", None)
+    log = config.stash.get(_USAGE_LOG, None) if config is not None else None
+    if isinstance(exported, dict) and log is not None:
+        log.merge(cast("dict[str, list[dict[str, Any]]]", exported))
 
 
 @pytest.hookimpl(wrapper=True, tryfirst=True)
