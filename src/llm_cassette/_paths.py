@@ -51,45 +51,47 @@ def parse_paths(paths: Sequence[str], *, argument: str) -> tuple[JsonPath, ...]:
     return tuple(JsonPath.parse(path) for path in paths)
 
 
-def _list_indexes(head: str, length: int) -> range | tuple[int, ...]:
-    if head == WILDCARD:
-        return range(length)
-    if head.isascii() and head.isdigit() and int(head) < length:
-        return (int(head),)
-    return ()
+def _selects_index(head: str, index: int) -> bool:
+    return head == WILDCARD or (head.isascii() and head.isdigit() and int(head) == index)
 
 
-def _rewrite(node: JSONValue, segments: tuple[str, ...], leaf: _Leaf) -> JSONValue | _Deleted:
-    if not segments:
+def _rewrite(
+    node: JSONValue, suffixes: Sequence[tuple[str, ...]], leaf: _Leaf
+) -> JSONValue | _Deleted:
+    """Apply every path suffix to ``node`` at once, so all of them see the original document.
+
+    Applying paths one after another would let an earlier deletion shift the list indexes that a
+    later path refers to: ``messages.0`` and ``messages.1`` must remove the first two messages.
+    """
+    if any(not suffix for suffix in suffixes):
         return leaf(node)
-    head, rest = segments[0], segments[1:]
     if isinstance(node, dict):
-        keys = list(node) if head == WILDCARD else [head] if head in node else []
-        if not keys:
-            return node
-        new_object = dict(node)
-        for key in keys:
-            new_value = _rewrite(node[key], rest, leaf)
-            if isinstance(new_value, _Deleted):
-                del new_object[key]
-            else:
-                new_object[key] = new_value
-        return new_object
+        new_object: dict[str, JSONValue] = {}
+        changed = False
+        for key, child in node.items():
+            rests = [tuple(rest) for head, *rest in suffixes if head in {key, WILDCARD}]
+            new_child = _rewrite(child, rests, leaf) if rests else child
+            changed = changed or new_child is not child
+            if not isinstance(new_child, _Deleted):
+                new_object[key] = new_child
+        return new_object if changed else node
     if isinstance(node, list):
-        indexes = _list_indexes(head, len(node))
-        if not indexes:
-            return node
         new_list: list[JSONValue] = []
+        changed = False
         for index, item in enumerate(node):
-            new_item = _rewrite(item, rest, leaf) if index in indexes else item
+            rests = [tuple(rest) for head, *rest in suffixes if _selects_index(head, index)]
+            new_item = _rewrite(item, rests, leaf) if rests else item
+            changed = changed or new_item is not item
             if not isinstance(new_item, _Deleted):
                 new_list.append(new_item)
-        return new_list
+        return new_list if changed else node
     return node
 
 
-def _apply(value: JSONValue, path: JsonPath, leaf: _Leaf) -> JSONValue:
-    result = _rewrite(value, path.segments, leaf)
+def _apply(value: JSONValue, paths: Sequence[JsonPath], leaf: _Leaf) -> JSONValue:
+    if not paths:
+        return value
+    result = _rewrite(value, [path.segments for path in paths], leaf)
     # Paths always have at least one segment, so the root itself is never the leaf.
     assert not isinstance(result, _Deleted)  # noqa: S101
     return result
@@ -109,17 +111,17 @@ def replace_paths(
         replaced = True
         return replacement
 
-    for path in paths:
-        value = _apply(value, path, leaf)
-    return value, replaced
+    return _apply(value, paths, leaf), replaced
 
 
 def delete_paths(value: JSONValue, paths: Sequence[JsonPath]) -> JSONValue:
-    """Remove every key or list item selected by ``paths``; the input is never mutated."""
+    """Remove every key or list item selected by ``paths``; the input is never mutated.
+
+    Every path is resolved against the original document, so list indexes refer to the items
+    as they were before anything was deleted.
+    """
 
     def leaf(_: JSONValue) -> _Deleted:
         return _DELETED
 
-    for path in paths:
-        value = _apply(value, path, leaf)
-    return value
+    return _apply(value, paths, leaf)

@@ -168,6 +168,34 @@ def test_delete_keys_and_list_items() -> None:
     assert result == {"model": "gpt-4o-mini", "messages": [{"role": "user", "content": "hi"}]}
 
 
+def test_list_indexes_refer_to_the_original_document() -> None:
+    """Deleting messages.0 must not shift what messages.1 refers to."""
+    document: JSONValue = {"messages": ["m0", "m1", "m2", "m3"]}
+    assert delete_paths(document, _paths("messages.0", "messages.1")) == {"messages": ["m2", "m3"]}
+    assert delete_paths(document, _paths("messages.3", "messages.0")) == {"messages": ["m1", "m2"]}
+    nested: JSONValue = {"m": [{"a": 1, "b": 2}, {"a": 3}]}
+    assert delete_paths(nested, _paths("m.0", "m.*.a")) == {"m": [{}]}
+    assert replace_paths(nested, _paths("m.0", "m.0.a"), "X") == ({"m": ["X", {"a": 3}]}, True)
+
+
+@given(
+    json_documents, st.lists(st.sampled_from(["a", "*", "0", "1", "a.b", "*.*", "1.*"]), max_size=3)
+)
+def test_delete_removes_exactly_what_replace_selects(document: JSONValue, texts: list[str]) -> None:
+    """Both resolve every path against the original document, so they select the same values."""
+    marked = replace_paths(document, _paths(*texts), "\0deleted")[0]
+
+    def prune(value: JSONValue) -> JSONValue:
+        if isinstance(value, dict):
+            return {k: prune(v) for k, v in value.items() if v != "\0deleted"}
+        if isinstance(value, list):
+            return [prune(v) for v in value if v != "\0deleted"]
+        return value
+
+    if "\0deleted" not in json.dumps(document):
+        assert delete_paths(document, _paths(*texts)) == prune(marked)
+
+
 def test_delete_every_list_item() -> None:
     assert delete_paths({"a": [1, 2, 3]}, _paths("a.*")) == {"a": []}
 
