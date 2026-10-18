@@ -18,9 +18,10 @@ from llm_cassette._matching import (
     Candidate,
     Matching,
     RequestKey,
+    builtin_mismatches,
+    custom_mismatches,
     describe_unmatched,
     index_key,
-    mismatches,
     request_key,
 )
 from llm_cassette._model import (
@@ -349,13 +350,14 @@ class Cassette:
         # The index narrows the search to interactions whose built-in aspects are equal, so the
         # cost of a hit does not grow with the cassette; custom matchers only see that bucket.
         bucket = self._index.get(index_key(self._matching, live_key), [])
-        matching_indexes = [
-            position
-            for position in bucket
-            if all(
-                match(live, self._replayable[position].request) for match in self._matching.custom
-            )
-        ]
+        rejected: dict[int, list[str]] = {}
+        matching_indexes: list[int] = []
+        for position in bucket:
+            reasons = custom_mismatches(self._matching, live, self._replayable[position].request)
+            if reasons:
+                rejected[position] = reasons
+            else:
+                matching_indexes.append(position)
         unused = next((p for p in matching_indexes if p not in self._used), None)
         if unused is not None:
             self._used.add(unused)
@@ -365,16 +367,28 @@ class Cassette:
             interaction = self._replayable[unused]
             self._played.append(interaction)
             return interaction
-        raise self._unmatched_error(live, live_key, exhausted=len(matching_indexes))
+        raise self._unmatched_error(
+            live, live_key, exhausted=len(matching_indexes), rejected=rejected
+        )
 
     def _unmatched_error(
-        self, live: RecordedRequest, live_key: RequestKey, *, exhausted: int
+        self,
+        live: RecordedRequest,
+        live_key: RequestKey,
+        *,
+        exhausted: int,
+        rejected: dict[int, list[str]],
     ) -> UnmatchedRequestError:
+        # Custom matchers already ran on the index bucket (``rejected``); everything else
+        # differs in a built-in aspect, so explaining a miss never calls user code again.
         keys = self._keys or []
         candidates = [
             Candidate(position, interaction, reasons)
             for position, (interaction, key) in enumerate(zip(self._replayable, keys, strict=True))
-            if (reasons := mismatches(self._matching, live, live_key, interaction.request, key))
+            if (
+                reasons := rejected.get(position)
+                or builtin_mismatches(self._matching, live_key, key)
+            )
         ]
         description = f"{self._path} (mode={self._mode.value}, "
         description += (

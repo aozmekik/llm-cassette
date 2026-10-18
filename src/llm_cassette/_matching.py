@@ -16,7 +16,9 @@ from llm_cassette._paths import JsonPath, delete_paths, parse_paths
 Matcher: TypeAlias = Callable[[RecordedRequest, RecordedRequest], bool]
 """A custom matcher: called as ``matcher(live, recorded)`` and returns whether they match.
 
-Both requests have already been redacted, so a matcher never sees a secret.
+Both requests have already been redacted, so a matcher never sees a secret. A matcher is only
+called for recorded requests that pass the built-in comparisons, but it should still expect any
+body: :meth:`RecordedRequest.json` returns ``None`` for a body that is not a JSON document.
 """
 
 _DEFAULT_PORTS = {"http": 80, "https": 443}
@@ -31,7 +33,7 @@ def _names(values: Sequence[str], *, argument: str) -> tuple[str, ...]:
     return tuple(values)
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, kw_only=True)
 class Matching:
     """How live requests are compared with recorded ones.
 
@@ -48,7 +50,8 @@ class Matching:
         ignore_paths: Dotted JSON paths removed from both bodies before comparing, e.g.
             ``"metadata.user_id"``, ``"stream_options"`` or ``"messages.*.cache_control"``.
         ignore_query: Query parameter names removed from both URLs before comparing.
-        custom: Extra :data:`Matcher` callables; all of them must return ``True``.
+        custom: Extra :data:`Matcher` callables; all of them must return ``True``. They are
+            only called for recorded requests that already pass the built-in comparisons.
     """
 
     method: bool = True
@@ -156,14 +159,10 @@ def _matcher_name(matcher: Matcher) -> str:
     return getattr(matcher, "__qualname__", None) or repr(matcher)
 
 
-def mismatches(
-    matching: Matching,
-    live: RecordedRequest,
-    live_key: RequestKey,
-    recorded: RecordedRequest,
-    recorded_key: RequestKey,
+def builtin_mismatches(
+    matching: Matching, live_key: RequestKey, recorded_key: RequestKey
 ) -> list[str]:
-    """List the aspects in which ``live`` differs from ``recorded``; empty means they match."""
+    """List the built-in aspects (method, URL, body, headers) in which two keys differ."""
     reasons: list[str] = []
     if matching.method and live_key.method != recorded_key.method:
         reasons.append("method")
@@ -176,12 +175,36 @@ def mismatches(
     ):
         if live_values != recorded_values:
             reasons.append(f"header {name}")
-    reasons.extend(
-        f"custom matcher {_matcher_name(matcher)}"
-        for matcher in matching.custom
-        if not matcher(live, recorded)
-    )
     return reasons
+
+
+def custom_mismatches(
+    matching: Matching, live: RecordedRequest, recorded: RecordedRequest
+) -> list[str]:
+    """Name the first custom matcher that rejects a pair that passed the built-in comparisons.
+
+    Matchers run in order and stop at the first rejection, so a later matcher can rely on the
+    earlier ones. Exceptions raised by a matcher propagate: they are bugs, not mismatches.
+    """
+    rejecting = next((m for m in matching.custom if not m(live, recorded)), None)
+    return [] if rejecting is None else [f"custom matcher {_matcher_name(rejecting)}"]
+
+
+def mismatches(
+    matching: Matching,
+    live: RecordedRequest,
+    live_key: RequestKey,
+    recorded: RecordedRequest,
+    recorded_key: RequestKey,
+) -> list[str]:
+    """List the aspects in which ``live`` differs from ``recorded``; empty means they match.
+
+    Custom matchers only run when every built-in comparison passes, so they never see a pair
+    with a different method or URL (or body, unless body matching is off).
+    """
+    return builtin_mismatches(matching, live_key, recorded_key) or custom_mismatches(
+        matching, live, recorded
+    )
 
 
 @dataclass(frozen=True, slots=True)

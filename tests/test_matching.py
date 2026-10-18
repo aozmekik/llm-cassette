@@ -118,6 +118,26 @@ def test_custom_matchers_see_both_requests() -> None:
     assert seen == [(URL, URL), (URL, URL)]
 
 
+def test_custom_matchers_only_run_when_the_built_in_aspects_match() -> None:
+    calls: list[str] = []
+
+    def spy(live: RecordedRequest, recorded: RecordedRequest) -> bool:
+        del live
+        calls.append(recorded.method)
+        return True
+
+    matching = Matching(custom=[spy])
+    assert not matching.matches(post({}), post({}, method="GET"))
+    assert calls == []
+    assert matching.matches(post({}), post({}))
+    assert calls == ["POST"]
+
+
+def test_matching_options_are_keyword_only() -> None:
+    with pytest.raises(TypeError):
+        Matching(False)  # type: ignore[call-arg]  # noqa: FBT003
+
+
 @pytest.mark.parametrize("argument", ["headers", "ignore_paths", "ignore_query"])
 def test_a_bare_string_is_rejected(argument: str) -> None:
     with pytest.raises(TypeError, match="not a single string"):

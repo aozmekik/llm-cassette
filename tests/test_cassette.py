@@ -388,3 +388,62 @@ def test_custom_matchers_pick_among_built_in_matches(cassette_path: Path) -> Non
     assert calls == ["a", "b"], "only interactions with an equal method, URL and body are tried"
     with pytest.raises(UnmatchedRequestError, match="1 matching interaction"):
         cassette.resolve(live)
+
+
+def test_custom_matchers_never_see_requests_that_differ_in_a_built_in_aspect(
+    cassette_path: Path,
+) -> None:
+    """The README's model matcher used to crash on a recorded GET while explaining a miss."""
+    with Cassette(cassette_path, mode="record") as cassette:
+        for request in (
+            RecordedRequest("GET", "https://api.example.com/v1/models"),
+            RecordedRequest("POST", URL, (), b'{"model": "a", "p": "hi"}'),
+        ):
+            recording = cassette.resolve(request)
+            assert isinstance(recording, Recording)
+            recording.start(200, [], delay_ms=0)
+            recording.finish()
+    seen: list[str] = []
+
+    def same_model(live: RecordedRequest, recorded: RecordedRequest) -> bool:
+        seen.append(recorded.method)
+        a, b = live.json(), recorded.json()
+        return isinstance(a, dict) and isinstance(b, dict) and a.get("model") == b.get("model")
+
+    cassette = Cassette(cassette_path, mode="none", matching=Matching(custom=[same_model]))
+    with pytest.raises(UnmatchedRequestError, match="differs in: body"):
+        cassette.resolve(RecordedRequest("POST", URL, (), b'{"model": "a", "p": "other"}'))
+    assert seen == [], "no recorded request passed the built-in comparisons"
+    assert len(cassette.unmatched) == 1
+
+
+def test_a_custom_matcher_rejection_is_explained(cassette_path: Path) -> None:
+    with Cassette(cassette_path, mode="record") as cassette:
+        record(cassette, req())
+    calls = 0
+
+    def never(live: RecordedRequest, recorded: RecordedRequest) -> bool:
+        nonlocal calls
+        calls += 1
+        return live is recorded
+
+    cassette = Cassette(cassette_path, mode="none", matching=Matching(custom=[never]))
+    with pytest.raises(UnmatchedRequestError) as raised:
+        cassette.resolve(req())
+    assert "differs in: custom matcher " in str(raised.value)
+    assert "never" in str(raised.value)
+    assert calls == 1, "explaining the miss reuses the matcher's verdict"
+
+
+def test_an_exception_in_a_custom_matcher_propagates(cassette_path: Path) -> None:
+    with Cassette(cassette_path, mode="record") as cassette:
+        record(cassette, req())
+
+    def broken(live: RecordedRequest, recorded: RecordedRequest) -> bool:
+        del live, recorded
+        msg = "bug in the matcher"
+        raise RuntimeError(msg)
+
+    cassette = Cassette(cassette_path, mode="none", matching=Matching(custom=[broken]))
+    with pytest.raises(RuntimeError, match="bug in the matcher"):
+        cassette.resolve(req())
