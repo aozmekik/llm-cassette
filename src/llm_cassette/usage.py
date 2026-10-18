@@ -152,15 +152,16 @@ class _Accumulator:
         )
 
     def _anthropic_delta(self, usage: Mapping[str, JSONValue]) -> None:
-        # message_delta counts are cumulative and override the message_start values.
+        # message_delta counts are cumulative and override the message_start values. A field
+        # that is missing or null keeps its earlier value, as the anthropic SDK's accumulator does.
         self.provider = self.provider or "anthropic"
-        if "input_tokens" in usage:
+        if usage.get("input_tokens") is not None:
             self.input_tokens = _count(usage, "input_tokens")
-        if "cache_read_input_tokens" in usage:
+        if usage.get("cache_read_input_tokens") is not None:
             self.cache_read_tokens = _count(usage, "cache_read_input_tokens")
-        if "cache_creation_input_tokens" in usage:
+        if usage.get("cache_creation_input_tokens") is not None:
             self.cache_write_tokens = _count(usage, "cache_creation_input_tokens")
-        if "output_tokens" in usage:
+        if usage.get("output_tokens") is not None:
             self.output_tokens = _count(usage, "output_tokens")
 
     def feed(self, payload: Mapping[str, JSONValue]) -> None:

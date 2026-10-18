@@ -332,3 +332,40 @@ def test_message_delta_without_output_tokens_keeps_earlier_counts() -> None:
     usage = usage_of(streamed(events))
     assert usage is not None
     assert (usage.input_tokens, usage.output_tokens) == (2, 1)
+
+
+def test_null_message_delta_fields_keep_the_message_start_counts() -> None:
+    """Proxies may serialize the optional usage fields as null; the SDK keeps the start values."""
+    start_usage = {
+        "input_tokens": 25,
+        "cache_creation_input_tokens": 3,
+        "cache_read_input_tokens": 11,
+        "output_tokens": 1,
+    }
+    events: list[tuple[str | None, Any]] = [
+        (
+            "message_start",
+            {"type": "message_start", "message": {"model": "claude-x", "usage": start_usage}},
+        ),
+        (
+            "message_delta",
+            {
+                "type": "message_delta",
+                "usage": {
+                    "input_tokens": None,
+                    "cache_creation_input_tokens": None,
+                    "cache_read_input_tokens": None,
+                    "output_tokens": 15,
+                },
+            },
+        ),
+        ("message_stop", {"type": "message_stop"}),
+    ]
+    usage = usage_of(streamed(events))
+    assert usage is not None
+    assert (
+        usage.input_tokens,
+        usage.cache_read_tokens,
+        usage.cache_write_tokens,
+        usage.output_tokens,
+    ) == (25, 11, 3, 15)
