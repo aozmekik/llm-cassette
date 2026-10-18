@@ -48,6 +48,8 @@ json_documents = st.dictionaries(st.text(max_size=8), json_values, max_size=5) |
         (b'{"a": Infinity}', None),
         (b"\xff\xfe{}", None),
         (b"[" * 100_000 + b"]" * 100_000, None),
+        (b'{"temperature": 1e400}', None),
+        (b'{"temperature": 1e300}', {"temperature": 1e300}),
     ],
     ids=[
         "object",
@@ -61,6 +63,8 @@ json_documents = st.dictionaries(st.text(max_size=8), json_values, max_size=5) |
         "inf",
         "utf8",
         "deep",
+        "overflow",
+        "large-float",
     ],
 )
 def test_parse_document(data: bytes, expected: JSONValue) -> None:

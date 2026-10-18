@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 from typing import NoReturn, TypeAlias, cast
 
 JSONValue: TypeAlias = bool | int | float | str | list["JSONValue"] | dict[str, "JSONValue"] | None
@@ -23,6 +24,21 @@ def _reject_constant(name: str) -> NoReturn:
     raise ValueError(msg)
 
 
+def _finite_float(text: str) -> float:
+    # A literal such as 1e400 overflows to infinity, which no cassette format can store.
+    value = float(text)
+    if not math.isfinite(value):
+        msg = f"JSON number {text} does not fit in a float"
+        raise ValueError(msg)
+    return value
+
+
+def _loads(data: bytes) -> object:
+    return json.loads(
+        data.decode("utf-8"), parse_constant=_reject_constant, parse_float=_finite_float
+    )
+
+
 def _depth(value: JSONValue) -> int:
     deepest, stack = 0, [(value, 1)]
     while stack:
@@ -38,14 +54,15 @@ def parse_document(data: bytes) -> JSONDocument | None:
     """Parse ``data`` as a JSON object or array.
 
     Returns ``None`` for anything else: empty bodies, invalid UTF-8, invalid JSON, JSON scalars,
-    the non-standard ``NaN``/``Infinity`` constants that :mod:`json` accepts by default, and
-    documents nested more than :data:`MAX_DEPTH` levels deep.
+    the non-standard ``NaN``/``Infinity`` constants that :mod:`json` accepts by default, numbers
+    too large for a float (``1e400``), and documents nested more than :data:`MAX_DEPTH` levels
+    deep.
     """
     stripped = data.lstrip(_WHITESPACE)
     if not stripped or stripped[0] not in _DOCUMENT_START:
         return None
     try:
-        value = json.loads(data.decode("utf-8"), parse_constant=_reject_constant)
+        value = _loads(data)
     except (UnicodeDecodeError, ValueError, RecursionError):
         return None
     if not isinstance(value, dict | list):  # pragma: no cover - guarded by the first-byte check

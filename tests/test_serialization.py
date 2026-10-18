@@ -155,6 +155,13 @@ def test_awkward_multiline_strings_survive(text: str) -> None:
     assert loaded.response.chunks == chunks
 
 
+def test_an_overflowing_json_number_is_stored_as_text() -> None:
+    body = b'{"temperature": 1e400}'
+    (loaded,) = roundtrip([interaction(body=body)], "yaml")
+    assert loaded.request.body == body
+    assert "text: '{\"temperature\": 1e400}'" in dumps([interaction(body=body)], "yaml")
+
+
 def test_delays_are_rounded_to_a_tenth_of_a_millisecond() -> None:
     item = interaction(chunks=(Chunk(b"x", 1.23456),))
     (loaded,) = roundtrip([item], "yaml")
