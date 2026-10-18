@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import math
 import os
+import secrets
 import stat
-import tempfile
 import threading
 from collections.abc import Callable, Iterable
 from enum import StrEnum
@@ -35,7 +35,8 @@ from llm_cassette._redaction import Redaction
 from llm_cassette._serialization import Format, dumps, loads
 
 _FORMATS: dict[str, Format] = {".yaml": "yaml", ".yml": "yaml", ".json": "json"}
-_NEW_FILE_MODE = 0o644
+# Like any newly created file, a new cassette gets 0o666 minus the process umask.
+_NEW_FILE_MODE = 0o666
 
 
 class RecordMode(StrEnum):
@@ -146,18 +147,23 @@ def _format_for(path: Path) -> Format:
 
 
 def _atomic_write(path: Path, text: str) -> None:
+    """Write ``text`` to a temporary file next to ``path``, flush it to disk, then rename it."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    # mkstemp creates the file readable by its owner only; keep an existing cassette's mode, and
-    # give a new one the usual 0o644 rather than leaving it private.
-    mode = stat.S_IMODE(path.stat().st_mode) if path.exists() else _NEW_FILE_MODE
-    fd, temporary = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    existing_mode = stat.S_IMODE(path.stat().st_mode) if path.exists() else None
+    temporary = path.with_name(f".{path.name}.{secrets.token_hex(8)}.tmp")
+    # Creating the file with os.open lets the OS apply the umask (mkstemp would make it private).
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+    fd = os.open(temporary, flags, _NEW_FILE_MODE)
     try:
         with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
             handle.write(text)
-        Path(temporary).chmod(mode)
-        Path(temporary).replace(path)
+            handle.flush()
+            os.fsync(handle.fileno())
+        if existing_mode is not None:
+            temporary.chmod(existing_mode)
+        temporary.replace(path)
     except BaseException:
-        Path(temporary).unlink(missing_ok=True)
+        temporary.unlink(missing_ok=True)
         raise
 
 
@@ -410,8 +416,9 @@ class Cassette:
     def save(self) -> bool:
         """Write the cassette if this session recorded anything new.
 
-        Replaying cassettes never write. The file is replaced atomically, so an interrupted
-        save never leaves a half-written cassette behind.
+        Replaying cassettes never write. The new contents go to a temporary file that is flushed
+        to disk and then renamed over the old one, so an interrupted save never leaves a
+        half-written cassette behind.
 
         Returns:
             Whether the file was written.

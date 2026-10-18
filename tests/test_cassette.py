@@ -4,6 +4,7 @@ import json
 import os
 import stat
 import threading
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -271,8 +272,17 @@ def test_saving_is_atomic(cassette_path: Path, monkeypatch: pytest.MonkeyPatch) 
     assert sorted(p.name for p in cassette_path.parent.iterdir()) == [cassette_path.name]
 
 
+@pytest.fixture
+def umask() -> Iterator[Callable[[int], int]]:
+    original = os.umask(0o022)
+    os.umask(original)
+    yield os.umask
+    os.umask(original)
+
+
 @pytest.mark.skipif(os.name == "nt", reason="POSIX permissions")
-def test_saved_files_get_ordinary_permissions(cassette_path: Path) -> None:
+def test_new_files_follow_the_umask(cassette_path: Path, umask: Callable[[int], int]) -> None:
+    umask(0o022)
     with Cassette(cassette_path, mode="record") as cassette:
         record(cassette, req())
     assert stat.S_IMODE(cassette_path.stat().st_mode) == 0o644
@@ -280,6 +290,28 @@ def test_saved_files_get_ordinary_permissions(cassette_path: Path) -> None:
     with Cassette(cassette_path, mode="record") as cassette:
         record(cassette, req("again"))
     assert stat.S_IMODE(cassette_path.stat().st_mode) == 0o664, "an existing mode is kept"
+
+    private = cassette_path.with_name("private.yaml")
+    umask(0o077)  # cassettes can hold prompts and customer data
+    with Cassette(private, mode="record") as cassette:
+        record(cassette, req())
+    assert stat.S_IMODE(private.stat().st_mode) == 0o600
+
+
+def test_saving_flushes_the_file_to_disk(
+    cassette_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    synced: list[int] = []
+    real_fsync = os.fsync
+
+    def fsync(fd: int) -> None:
+        synced.append(fd)
+        real_fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", fsync)
+    with Cassette(cassette_path, mode="record") as cassette:
+        record(cassette, req())
+    assert len(synced) == 1
 
 
 def test_context_manager_saves_even_when_the_block_raises(cassette_path: Path) -> None:
