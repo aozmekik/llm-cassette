@@ -21,9 +21,9 @@ of the stream silently got less. Two SDK behaviours matter here:
 
 - `openai`'s sync client stops reading at `data: [DONE]` and closes the response, so the
   transport never sees the end of the body even though nothing else follows in practice.
-- `openai`'s async client drains the body after `[DONE]` for at most 0.1 s (inside
-  `anyio.move_on_after`), and ignores transport errors while doing so; `anthropic` reads to the
-  end.
+- `openai`'s async client (3.34.0; 3.0.0 stops at `[DONE]` too) drains the body after `[DONE]`
+  for at most 0.1 s (inside `anyio.move_on_after`), and ignores transport errors while doing so;
+  `anthropic` reads to the end.
 
 Options considered:
 

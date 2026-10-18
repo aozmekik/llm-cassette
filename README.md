@@ -270,7 +270,9 @@ When the client stopped first (it closed the response early, or Ctrl-C or a canc
 that stops at the same point behaves exactly as it did, and one that reads further gets an
 `httpx.ReadError` that says to re-record, instead of a body that silently ends early.
 `openai`'s sync client stops reading at `data: [DONE]`, so its streamed chat completions are
-recorded as incomplete and replay identically; the async client and `anthropic` read to the end.
+recorded as incomplete and replay identically; `anthropic` reads to the end, and so does
+`openai`'s async client in recent releases (3.34.0 drains the body after `[DONE]`; 3.0.0 stops
+there like the sync client).
 
 ### Without pytest
 

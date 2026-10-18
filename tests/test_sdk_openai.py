@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 from pathlib import Path
 from typing import Any
 
@@ -82,10 +83,12 @@ def test_a_stream_abandoned_while_recording_fails_loudly_on_replay(
             assert next(iter(stream)).model_dump() == first.model_dump(), (
                 "the same early exit works"
             )
-        with pytest.raises(openai.APIConnectionError) as raised:
+        # openai 3.0.0 lets the transport error through; later releases wrap it.
+        with pytest.raises((openai.APIConnectionError, httpx2.ReadError)) as raised:
             list(chat(openai_client(cassette), stream=True))
-    assert isinstance(raised.value.__cause__, httpx2.ReadError)
-    assert "re-record the cassette" in str(raised.value.__cause__)
+    error = raised.value.__cause__ if isinstance(raised.value, openai.APIError) else raised.value
+    assert isinstance(error, httpx2.ReadError)
+    assert "re-record the cassette" in str(error)
 
 
 @pytest.mark.anyio
@@ -102,8 +105,12 @@ async def test_async_chat_and_stream(cassette_path: Path, upstream: FakeUpstream
         live = await run(
             async_openai_client(cassette, transport=upstream.transport(), api_key=FAKE_OPENAI_KEY)
         )
-        # The async client drains the body after [DONE] (for HTTP/1.1 connection reuse).
-        assert all(i.response.complete for i in cassette.interactions)
+        completion, stream = cassette.interactions
+        assert completion.response.complete
+        # Recent async clients (3.34.0 here) drain the body after [DONE], so the stream is
+        # complete; 3.0.0 stops at [DONE] like the sync client. Either way it replays the same.
+        drains = importlib.util.find_spec("openai._streaming_cleanup") is not None
+        assert stream.response.complete is drains
     with Cassette(cassette_path, mode="none") as cassette:
         replayed = await run(async_openai_client(cassette))
     assert replayed == live
@@ -130,7 +137,7 @@ async def test_an_async_stream_abandoned_while_recording(
         stream = await async_openai_client(cassette).chat.completions.create(
             model="gpt-4o-mini", messages=MESSAGES, stream=True
         )
-        with pytest.raises(openai.APIConnectionError):
+        with pytest.raises((openai.APIConnectionError, httpx2.ReadError)):
             async for _ in stream:
                 pass
 
