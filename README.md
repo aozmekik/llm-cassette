@@ -434,12 +434,12 @@ same for one or a thousand recorded interactions; the full comparison only runs 
 | pytest | `pytest` 8.3.0 and 9.1.1, `pytest-xdist` 3.6.1 and 3.8.0 |
 
 The lowest versions come from installing with `uv pip install --resolution lowest-direct -e .
---group dev` and running the full suite (446 tests passed on Python 3.11.16 and 3.12.15); CI
+--group dev` and running the full suite (470 tests passed on Python 3.11.16 and 3.12.15); CI
 repeats this on Python 3.11. Windows is not tested yet.
 
 ## Testing
 
-The suite has 446 tests and 100% line and branch coverage of `src/` (1728 statements, 434 branches),
+The suite has 470 tests and 100% line and branch coverage of `src/` (1767 statements, 454 branches),
 from `uv run coverage run -m pytest && uv run coverage report` in a fresh clone on an Apple M1 Pro
 with 16 GB, macOS 26, with the same result on Python 3.14.5, 3.11.16, 3.12.15 and 3.13.2. No test
 calls a real API: fake upstreams built on `httpx2.MockTransport` follow the documented OpenAI Chat
@@ -458,28 +458,28 @@ ruff's pyflakes rules (`tests/test_readme.py`).
 
 `uv run python benchmarks/replay_overhead.py` (1000 calls x 7 repeats after a warm-up repeat;
 median, min-max in parentheses; synthetic payloads) on an Apple M1 Pro, 16 GB, macOS 26, with
-Python 3.14.5 and httpx2 2.13.1. Other builds were running on the machine at the same time (load
-average about 7 on 8 cores), so the numbers are noisy: across three consecutive runs the median
-overhead was 49-52 us for the JSON case and 67-71 us for the SSE case. The tables show the second
-run.
+Python 3.14.5 and httpx2 2.13.1, with the default `Redaction()` (no `secrets` configured). Other
+builds were running on the machine at the same time (load average about 6 on 8 cores), so the
+numbers are noisy: across three consecutive runs the median overhead was 48 us for the JSON case
+and 62-66 us for the SSE case. The tables show the second run.
 
 Per request through an `httpx2.Client`, compared with an `httpx2.MockTransport` that builds the
 same response in memory:
 
 | response | mock, us/request | replay, us/request | overhead, us |
 |---|---|---|---|
-| 2 KB JSON, 1 chunk | 46 (44-46) | 95 (94-96) | 49 |
-| SSE, 201 chunks | 103 (103-104) | 170 (169-176) | 67 |
+| 2 KB JSON, 1 chunk | 43 (42-44) | 91 (90-93) | 48 |
+| SSE, 201 chunks | 100 (99-102) | 166 (164-221) | 66 |
 
 `Cassette.resolve` alone (redact, normalize and look up a 2 KB JSON request), with the matching
 interaction recorded last:
 
 | recorded interactions | us/call |
 |---|---|
-| 1 | 15 (15-15) |
-| 10 | 16 (15-17) |
-| 100 | 15 (15-16) |
-| 1000 | 14 (14-15) |
+| 1 | 14 (14-14) |
+| 10 | 14 (14-14) |
+| 100 | 14 (14-14) |
+| 1000 | 14 (14-14) |
 
 In other words, replaying adds tens of microseconds per request, which is negligible next to a
 real API round trip, and the lookup cost does not grow with the cassette.
