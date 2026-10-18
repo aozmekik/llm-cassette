@@ -419,27 +419,30 @@ same for one or a thousand recorded interactions; the full comparison only runs 
 
 | | tested with |
 |---|---|
-| Python | 3.11.16, 3.12.10, 3.13.2 and 3.14.5 locally (macOS); CI runs 3.11 to 3.14 on Ubuntu and 3.14 on macOS |
+| Python | 3.11.16, 3.12.15, 3.13.2 and 3.14.5 locally (macOS); CI runs 3.11 to 3.14 on Ubuntu and 3.14 on macOS |
 | SDKs | `openai` 3.0.0 and 3.34.0, `anthropic` 1.0.0 and 1.15.0 |
 | HTTP | `httpx2` 2.7.0 and 2.13.1, `httpx` 0.27.0 and 0.28.1 |
+| pytest | `pytest` 8.3.0 and 9.1.1, `pytest-xdist` 3.6.1 and 3.8.0 |
 
 The lowest versions come from installing with `uv pip install --resolution lowest-direct -e .
---group dev` and running the full suite (331 tests passed on Python 3.11.16 and 3.12.10); CI
+--group dev` and running the full suite (438 tests passed on Python 3.11.16 and 3.12.15); CI
 repeats this on Python 3.11. Windows is not tested yet.
 
 ## Testing
 
-The suite has 331 tests and 100% line and branch coverage of `src/` (1460 statements, 362
+The suite has 438 tests and 100% line and branch coverage of `src/` (1728 statements, 434
 branches), from `uv run coverage run -m pytest && uv run coverage report` in a fresh clone on an
-Apple M1 Pro with 16 GB, macOS 26, with Python 3.14.5 and again with 3.11.16; the suite also
-passed on 3.12.10 and 3.13.2. No test calls a real API: fake
+Apple M1 Pro with 16 GB, macOS 26, with the same result on Python 3.14.5, 3.11.16, 3.12.15 and
+3.13.2. No test calls a real API: fake
 upstreams built on `httpx2.MockTransport` follow the documented OpenAI Chat Completions
 (including `include_usage` streaming), OpenAI Responses and Anthropic Messages (including the
 `message_start`, `content_block_start`, `content_block_delta`, `message_delta` and `message_stop`
 events) wire formats, split their streams at awkward byte offsets, and check credentials. The
 tests record through them and replay with the real `openai` and `anthropic` clients, sync and
-async. Property-based tests (Hypothesis) round-trip arbitrary JSON, text and bytes through the
-cassette format and check the SSE parser and the path rewriter.
+async, including streams cut short by an early `break`, Ctrl-C and cancellation. Property-based
+tests (Hypothesis) round-trip arbitrary JSON, text and bytes through the cassette format, check
+the SSE parser and the path rewriter, and check that redaction is idempotent and leaves no
+encoded secret behind.
 
 ## Benchmarks
 
