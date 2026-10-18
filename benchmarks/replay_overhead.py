@@ -11,7 +11,8 @@ The difference is llm-cassette's per-request overhead: snapshotting and redactin
 matching it, and streaming the recorded chunks back.
 
 Table 2 times ``Cassette.resolve`` alone against cassettes of growing size, where the matching
-interaction is the last one, to show the cost of the linear matching scan.
+interaction is the last one recorded. Lookups go through an index of the built-in match aspects,
+so the cost should stay flat as the cassette grows.
 """
 
 from __future__ import annotations

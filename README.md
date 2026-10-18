@@ -442,31 +442,32 @@ cassette format and check the SSE parser and the path rewriter.
 ## Benchmarks
 
 `uv run python benchmarks/replay_overhead.py` (1000 calls x 7 repeats after a warm-up repeat;
-median, min-max in parentheses; synthetic payloads). Apple M1 Pro, 16 GB, macOS 26, Python
-3.14.5, httpx2 2.13.1. Other heavy jobs were running on the machine (load average about 32 on 8
-cores), so treat the numbers as rough: two earlier runs (one on Python 3.11.16) measured an
-overhead of 46-51 us for the JSON case and 64-94 us for the SSE case.
+median, min-max in parentheses; synthetic payloads) on an Apple M1 Pro, 16 GB, macOS 26, with
+Python 3.14.5 and httpx2 2.13.1. Other builds were running on the machine at the same time (load
+average about 7 on 8 cores), so the numbers are noisy: across three consecutive runs the median
+overhead was 49-52 us for the JSON case and 67-71 us for the SSE case. The tables show the second
+run.
 
 Per request through an `httpx2.Client`, compared with an `httpx2.MockTransport` that builds the
 same response in memory:
 
 | response | mock, us/request | replay, us/request | overhead, us |
 |---|---|---|---|
-| 2 KB JSON, 1 chunk | 48 (47-51) | 108 (100-114) | 60 |
-| SSE, 201 chunks | 128 (112-194) | 174 (171-183) | 46 |
+| 2 KB JSON, 1 chunk | 46 (44-46) | 95 (94-96) | 49 |
+| SSE, 201 chunks | 103 (103-104) | 170 (169-176) | 67 |
 
 `Cassette.resolve` alone (redact, normalize and look up a 2 KB JSON request), with the matching
 interaction recorded last:
 
 | recorded interactions | us/call |
 |---|---|
-| 1 | 14 (13-14) |
-| 10 | 14 (14-18) |
-| 100 | 14 (13-15) |
+| 1 | 15 (15-15) |
+| 10 | 16 (15-17) |
+| 100 | 15 (15-16) |
 | 1000 | 14 (14-15) |
 
 In other words, replaying adds tens of microseconds per request, which is negligible next to a
-real API round trip.
+real API round trip, and the lookup cost does not grow with the cassette.
 
 ## Limitations
 
