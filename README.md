@@ -247,8 +247,9 @@ cassette exposes or writes it:
 - `secrets` are replaced as is, JSON-escaped (`\u00e4`, `\"`) and percent-encoded (`%2B`, `+`).
   Before writing, the cassette also searches decoded JSON strings, percent-decoded text and the
   serialized file, and raises `SecretLeakError` if a secret is still there (for example split
-  across two streamed chunks). The pytest plugin adds the values of `OPENAI_API_KEY` and
-  `ANTHROPIC_API_KEY` (configurable with `llm_secret_env`).
+  across two streamed chunks). The check errs on the side of safety: a secret that also occurs in
+  text redaction keeps, such as a header name, fails it too. The pytest plugin adds the values of
+  `OPENAI_API_KEY` and `ANTHROPIC_API_KEY` (configurable with `llm_secret_env`).
 - When redaction changes a response body, `content-length` is adjusted to match.
 - `drop_headers` keeps headers that change with the SDK, OS or Python version out of the
   cassette, so re-recording on another machine gives a clean diff. Nothing is dropped by default.

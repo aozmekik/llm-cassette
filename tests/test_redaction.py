@@ -3,12 +3,11 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
-from typing import Any
 from urllib.parse import quote, quote_plus
 
 import httpx2
 import pytest
-from hypothesis import given
+from hypothesis import assume, given
 from hypothesis import strategies as st
 
 from llm_cassette import (
@@ -423,25 +422,51 @@ def test_the_default_headers_can_be_extended() -> None:
 secret_texts = st.text(st.characters(codec="utf-8", exclude_categories=["Cs"]), min_size=8)
 
 
-@given(secret_texts, st.sampled_from(["verbatim", "json", "json-ascii", "form", "path"]))
-def test_redaction_is_idempotent_and_leaves_no_secret(secret: str, encoding: str) -> None:
+def _carrying(*, path: str, form: str, json_text: str, json_ascii: str) -> Interaction:
+    """An interaction with the given texts in its URL path and query and in both JSON bodies."""
+    body = f'{{"user": "u", "echo": "{json_text}", "echo_ascii": "{json_ascii}"}}'.encode()
+    return Interaction(
+        request(url=f"https://user:pw@api.example.com/{path}?sig={form}", body=body),
+        RecordedResponse(200, JSON_TYPE, (Chunk(body),)),
+    )
+
+
+@given(secret_texts)
+def test_redaction_is_idempotent_and_leaves_no_secret(secret: str) -> None:
+    assume(secret not in R)  # Redaction rejects a secret that the placeholder contains
     redaction = Redaction(secrets=[secret], body_paths=["user"])
-    encoded: dict[str, Any] = {
-        "verbatim": secret,
-        "json": json.dumps(secret, ensure_ascii=False)[1:-1],
-        "json-ascii": json.dumps(secret)[1:-1],
-        "form": quote_plus(secret),
-        "path": quote(secret),
-    }
-    body = f'{{"user": "u", "echo": "{encoded[encoding] if encoding.startswith("json") else "x"}"}}'
-    url = f"https://user:pw@api.example.com/{encoded['path']}?sig={encoded['form']}"
-    interaction = Interaction(
-        request(url=url, body=body.encode()),
-        RecordedResponse(200, JSON_TYPE, (Chunk(body.encode()),)),
+    # A perfect redaction leaves the fixed text with placeholders where the secret was. A secret
+    # that occurs in that text anyway (in a header name, or across the host and a placeholder as
+    # in "com/REDA") cannot be told apart from it, and find_secret reports it on purpose (see the
+    # next test), so the property is about every other secret.
+    perfect = Redaction(body_paths=["user"]).redact(
+        _carrying(path=R, form=R, json_text=R, json_ascii=R)
+    )
+    assume(redaction.find_secret([perfect]) is None)
+    interaction = _carrying(
+        path=quote(secret),
+        form=quote_plus(secret),
+        json_text=json.dumps(secret, ensure_ascii=False)[1:-1],
+        json_ascii=json.dumps(secret)[1:-1],
     )
     once = redaction.redact(interaction)
     assert redaction.redact(once) == once
     assert redaction.find_secret([once]) is None
+    assert once.request.url == perfect.request.url
+
+
+@pytest.mark.parametrize(
+    ("secret", "where"),
+    [
+        ("content-", "interactions[0].response.headers"),  # part of the header name content-type
+        ("com/REDA", "interactions[0].request.url"),  # the host followed by a placeholder
+    ],
+)
+def test_a_secret_that_matches_text_redaction_keeps_is_reported(secret: str, where: str) -> None:
+    """The leak check cannot tell such a secret from the text, so it errs on the side of safety."""
+    redaction = Redaction(secrets=[secret])
+    interaction = _carrying(path=quote(secret), form="x", json_text="x", json_ascii="x")
+    assert redaction.find_secret([redaction.redact(interaction)]) == where
 
 
 def test_header_names_are_case_insensitive() -> None:
