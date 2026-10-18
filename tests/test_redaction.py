@@ -378,6 +378,7 @@ def test_find_secret_catches_a_secret_split_across_chunks() -> None:
         ({"placeholder": "a\nb"}, ValueError, "valid header value"),
         ({"placeholder": "REDACTED\t"}, ValueError, "printable ASCII"),
         ({"placeholder": "gizlendi—"}, ValueError, "printable ASCII"),
+        ({"drop_headers": "user-agent"}, TypeError, "not a single string"),
         ({"substrings": [""]}, ValueError, "redact every header"),
         ({"headers": "authorization"}, TypeError, "not a single string"),
         ({"query_params": "key"}, TypeError, "not a single string"),
@@ -390,6 +391,27 @@ def test_invalid_configuration_is_rejected(
 ) -> None:
     with pytest.raises(error, match=match):
         Redaction(**kwargs)  # type: ignore[arg-type]
+
+
+def test_dropped_headers_disappear_from_requests_and_responses() -> None:
+    redaction = Redaction(drop_headers=["X-Stainless-*", "user-agent", "date"])
+    assert redaction.drop_headers == ("x-stainless-*", "user-agent", "date")
+    interaction = Interaction(
+        request(
+            headers=(
+                ("authorization", "Bearer sk-x"),
+                ("user-agent", "OpenAI/Python 3.34.0"),
+                ("x-stainless-os", "MacOS"),
+                ("X-Stainless-Runtime-Version", "3.14.5"),
+            )
+        ),
+        RecordedResponse(200, (("content-type", "application/json"), ("date", "Sat, 18 Oct"))),
+    )
+    redacted = redaction.redact(interaction)
+    assert redacted.request.headers == (("authorization", R),)
+    assert redacted.response.headers == (("content-type", "application/json"),)
+    assert redaction.is_dropped_header("X-STAINLESS-ARCH")
+    assert not Redaction().is_dropped_header("user-agent"), "nothing is dropped by default"
 
 
 def test_the_default_headers_can_be_extended() -> None:

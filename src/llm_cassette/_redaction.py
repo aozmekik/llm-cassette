@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fnmatch
 import json
 import re
 from collections.abc import Callable, Iterable, Iterator, Sequence
@@ -192,6 +193,10 @@ class Redaction:
             decoded JSON strings, in percent-decoded text and in the serialized file; if one
             survived (for instance split across two streamed chunks), it refuses to write and
             raises :class:`~llm_cassette.SecretLeakError`.
+        drop_headers: Header names, or :mod:`fnmatch` patterns such as ``"x-stainless-*"``, removed
+            from requests and responses altogether (case-insensitive). Dropping volatile headers
+            such as ``user-agent`` keeps re-recorded cassettes from changing with the SDK, OS or
+            Python version.
         placeholder: The replacement value; printable ASCII, since it is also a header value.
     """
 
@@ -200,6 +205,7 @@ class Redaction:
     query_params: AbstractSet[str] = frozenset()
     body_paths: Sequence[str] = ()
     secrets: Sequence[str] = ()
+    drop_headers: Sequence[str] = ()
     placeholder: str = "REDACTED"
     _text_replacements: tuple[tuple[str, str], ...] = field(init=False, repr=False, compare=False)
     _byte_replacements: tuple[tuple[bytes, bytes], ...] = field(
@@ -219,6 +225,8 @@ class Redaction:
         object.__setattr__(self, "substrings", substrings)
         object.__setattr__(self, "body_paths", _strings(self.body_paths, argument="body_paths"))
         _compiled(tuple(self.body_paths))  # validate early: raises ValueError on a bad path
+        drop = tuple(p.lower() for p in _strings(self.drop_headers, argument="drop_headers"))
+        object.__setattr__(self, "drop_headers", drop)
         if not (self.placeholder.isascii() and self.placeholder.isprintable()):
             msg = "the placeholder must be printable ASCII, so that it is a valid header value"
             raise ValueError(msg)
@@ -245,6 +253,11 @@ class Redaction:
         """Return whether query parameter ``name`` is redacted under this configuration."""
         lowered = name.lower()
         return lowered in self.query_params or any(s in lowered for s in self.substrings)
+
+    def is_dropped_header(self, name: str) -> bool:
+        """Return whether header ``name`` is removed altogether under this configuration."""
+        lowered = name.lower()
+        return any(fnmatch.fnmatchcase(lowered, pattern) for pattern in self.drop_headers)
 
     def redact_request(self, request: RecordedRequest) -> RecordedRequest:
         """Return a copy of ``request`` with every sensitive value replaced."""
@@ -390,7 +403,11 @@ class Redaction:
         return self._replace_secrets_bytes(raw).decode("latin-1")
 
     def _redact_headers(self, headers: Headers) -> Headers:
-        return tuple((name, self._redact_header(name, value)) for name, value in headers)
+        return tuple(
+            (name, self._redact_header(name, value))
+            for name, value in headers
+            if not self.is_dropped_header(name)
+        )
 
     def _redact_header(self, name: str, value: str) -> str:
         if self.is_sensitive_header(name):
