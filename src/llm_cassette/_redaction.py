@@ -13,6 +13,7 @@ from urllib.parse import (
     parse_qsl,
     quote,
     quote_plus,
+    unquote,
     unquote_plus,
     urlencode,
     urlsplit,
@@ -54,9 +55,10 @@ _URL_HEADERS = frozenset({"content-location", "link", "location", "referer"})
 _LINK_TARGET = re.compile(r"<([^>]*)>")
 # A JSON string literal, escapes included.
 _JSON_STRING = re.compile(r'"(?:[^"\\]|\\.)*"', re.DOTALL)
-# JSON text nests JSON strings in practice (tool-call arguments are a JSON document encoded as a
-# string), so string literals are decoded up to this many levels deep when looking for secrets.
-_MAX_ESCAPE_LEVELS = 4
+# The leak check decodes text this many levels deep. Decodings nest in practice: tool-call
+# arguments are a JSON document inside a JSON string, and a query parameter can hold a
+# percent-encoded JSON document.
+_MAX_DECODE_LEVELS = 4
 
 
 def _verbatim(text: str) -> str:
@@ -147,18 +149,42 @@ def _redact_userinfo(netloc: str, placeholder: str) -> str:
     return f"{redacted}@{host}"
 
 
-def _decoded_views(text: str, levels: int = _MAX_ESCAPE_LEVELS) -> Iterator[str]:
-    """``text`` itself, its percent-decoding, and the decoded value of its JSON strings."""
-    yield text
+def _decodings(text: str) -> Iterator[str]:
+    """What ``text`` decodes to one level down.
+
+    That is its percent-decoding, with ``+`` read as itself (as in a URL path) and as a space (as
+    in a form), and the value of each of its JSON string literals.
+    """
+    if "%" in text:
+        yield unquote(text)
     if "%" in text or "+" in text:
         yield unquote_plus(text)
-    if levels and "\\" in text:
+    if "\\" in text:
         for match in _JSON_STRING.finditer(text):
             try:
-                decoded = json.loads(match.group())
+                yield json.loads(match.group())
             except ValueError:
                 continue
-            yield from _decoded_views(decoded, levels - 1)
+
+
+def _decoded_views(text: str) -> Iterator[str]:
+    """``text`` and each distinct text it decodes to, up to ``_MAX_DECODE_LEVELS`` levels deep.
+
+    The decodings compose, so a percent-encoded JSON document in a query string is searched with
+    its escapes decoded, and so is a JSON document inside a JSON string.
+    """
+    yield text
+    seen = {text}
+    pending = [text]
+    for _ in range(_MAX_DECODE_LEVELS):
+        found: list[str] = []
+        for view in pending:
+            for decoded in _decodings(view):
+                if decoded not in seen:
+                    seen.add(decoded)
+                    found.append(decoded)
+                    yield decoded
+        pending = found
 
 
 def _headers_blob(headers: Headers) -> bytes:
@@ -190,9 +216,9 @@ class Redaction:
         secrets: Literal values (for example the API key itself) replaced anywhere in URLs,
             headers and bodies, including their JSON-escaped and percent-encoded forms. Before a
             cassette is written, :meth:`~llm_cassette.Cassette.save` also looks for them in
-            decoded JSON strings, in percent-decoded text and in the serialized file; if one
-            survived (for instance split across two streamed chunks), it refuses to write and
-            raises :class:`~llm_cassette.SecretLeakError`.
+            percent-decoded text, in decoded JSON strings and in the serialized file (see
+            :meth:`find_secret`); if one survived (for instance split across two streamed
+            chunks), it refuses to write and raises :class:`~llm_cassette.SecretLeakError`.
         drop_headers: Header names, or :mod:`fnmatch` patterns such as ``"x-stainless-*"``, removed
             from requests and responses altogether (case-insensitive). Dropping volatile headers
             such as ``user-agent`` keeps re-recorded cassettes from changing with the SDK, OS or
@@ -306,9 +332,12 @@ class Redaction:
     ) -> str | None:
         """Return where a configured secret appears in ``interactions``, or ``None``.
 
-        Each field is searched as is, percent-decoded, and with the escapes of its JSON strings
-        decoded; ``serialized``, the cassette text about to be written, is searched too. The
-        result names a location such as ``interactions[2].response.body``, never the secret.
+        Each field is searched as is and decoded: percent-decoded with ``+`` read both as itself
+        and as a space, and with the escapes of its JSON strings decoded, these decodings applied
+        on top of each other up to four levels deep. ``serialized``, the cassette text about to
+        be written, is searched the same way. A secret transformed in any other way (base64, a
+        hash) is not recognized. The result names a location such as
+        ``interactions[2].response.body``, never the secret.
         """
         if not self.secrets:
             return None

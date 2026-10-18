@@ -303,6 +303,26 @@ def test_escaped_secrets_never_reach_the_file(tmp_path: Path) -> None:
     assert text.count("REDACTED") >= 6
 
 
+B64_SECRET = "Zm9vYmFy+YmF6/cXV4=="  # base64 text: holds +, / and =
+
+
+@pytest.mark.parametrize(
+    "form",
+    [
+        re.sub(r"%[0-9A-F]{2}", lambda m: m.group().lower(), quote_plus(B64_SECRET)),
+        "Zm9vYmFy+YmF6%2FcXV4%3D%3D",  # + read as itself, not as a space
+        quote('{"k": "Zm9vYmFy\\u002BYmF6/cXV4=="}'),  # a JSON escape inside percent-encoding
+    ],
+    ids=["lower-case-hex", "literal-plus", "percent-encoded-json"],
+)
+def test_find_secret_decodes_bodies_redaction_leaves_alone(form: str) -> None:
+    """Outside URLs, only the common encodings of a secret are replaced; the check decodes."""
+    redaction = Redaction(secrets=[B64_SECRET])
+    leaked = Interaction(request(body=f"q={form}".encode()), RecordedResponse(200))
+    assert redaction.redact(leaked).request.body == f"q={form}".encode()
+    assert redaction.find_secret([redaction.redact(leaked)]) == "interactions[0].request.body"
+
+
 def test_find_secret_looks_inside_decoded_views() -> None:
     secret = "Zm9v+YmFy/YmF6="
     redaction = Redaction(secrets=[secret])
