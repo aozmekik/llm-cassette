@@ -57,6 +57,8 @@ def test_streamed_message_events(cassette_path: Path, upstream: FakeUpstream) ->
         live = run(
             anthropic_client(cassette, transport=upstream.transport(), api_key=FAKE_ANTHROPIC_KEY)
         )
+        (recorded,) = cassette.interactions
+    assert recorded.response.complete, "the anthropic SDK reads the stream to its end"
     with Cassette(cassette_path, mode="none") as cassette:
         replayed = run(anthropic_client(cassette))
         (played,) = cassette.played

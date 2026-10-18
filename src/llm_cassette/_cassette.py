@@ -70,8 +70,12 @@ class RecordMode(StrEnum):
 class Recording:
     """An interaction being recorded: returned by :meth:`Cassette.resolve` in recording mode.
 
-    HTTP adapters fill it in as the upstream response arrives. You only use this class directly
-    when writing an adapter for another HTTP client; instances are created by the cassette.
+    HTTP adapters fill it in as the upstream response arrives: :meth:`start` with the status and
+    headers, :meth:`add_chunk` for every body chunk, then :meth:`finish` once the body has been
+    read to its end, or :meth:`abandon` if the upstream failed. A recording that is never
+    finished is saved as incomplete (see :attr:`RecordedResponse.complete`). You only use this
+    class directly when writing an adapter for another HTTP client; instances are created by the
+    cassette.
     """
 
     def __init__(
@@ -83,6 +87,7 @@ class Recording:
         self._on_change = on_change
         self._response: RecordedResponse | None = None
         self._chunks: list[Chunk] = []
+        self._complete = False
         self._abandoned = False
 
     @property
@@ -104,6 +109,12 @@ class Recording:
             self._chunks.append(Chunk(data=data, delay_ms=delay_ms))
             self._on_change()
 
+    def finish(self) -> None:
+        """Record that the client read the body to its end, so nothing of it is missing."""
+        with self._lock:
+            self._complete = True
+            self._on_change()
+
     def abandon(self) -> None:
         """Drop this recording, for example because the upstream request failed."""
         with self._lock:
@@ -120,6 +131,7 @@ class Recording:
                 headers=self._response.headers,
                 chunks=tuple(self._chunks),
                 delay_ms=self._response.delay_ms,
+                complete=self._complete,
             )
             return Interaction(request=self._request, response=response)
 

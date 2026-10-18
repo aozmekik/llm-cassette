@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+import httpx2
 import openai
 import pytest
 
@@ -49,6 +50,11 @@ def test_streamed_chat_with_include_usage(cassette_path: Path, upstream: FakeUps
         (recorded,) = cassette.interactions
     assert len(recorded.response.chunks) > 10, "the fake split the stream into many chunks"
 
+    # The sync client stops reading at [DONE] and closes the response, so the recording cannot
+    # know whether more bytes would have followed; replaying stops at the same place.
+    assert not recorded.response.complete
+    assert recorded.response.body.endswith(b"data: [DONE]\n\n")
+
     with Cassette(cassette_path, mode="none") as cassette:
         replayed = [chunk.model_dump() for chunk in chat(openai_client(cassette), **options)]
         (played,) = cassette.played
@@ -60,6 +66,26 @@ def test_streamed_chat_with_include_usage(cassette_path: Path, upstream: FakeUps
     usage = usage_of(played)
     assert usage is not None
     assert (usage.input_tokens, usage.cache_read_tokens, usage.output_tokens) == (7, 4, 6)
+
+
+def test_a_stream_abandoned_while_recording_fails_loudly_on_replay(
+    cassette_path: Path, upstream: FakeUpstream
+) -> None:
+    """Breaking out early while recording must not replay as a shorter, successful stream."""
+    with Cassette(cassette_path, mode="once") as cassette:
+        client = openai_client(cassette, transport=upstream.transport(), api_key=FAKE_OPENAI_KEY)
+        with chat(client, stream=True) as stream:
+            first = next(iter(stream))
+        assert first.choices[0].delta.role == "assistant"
+    with Cassette(cassette_path, mode="none", allow_repeats=True) as cassette:
+        with chat(openai_client(cassette), stream=True) as stream:
+            assert next(iter(stream)).model_dump() == first.model_dump(), (
+                "the same early exit works"
+            )
+        with pytest.raises(openai.APIConnectionError) as raised:
+            list(chat(openai_client(cassette), stream=True))
+    assert isinstance(raised.value.__cause__, httpx2.ReadError)
+    assert "re-record the cassette" in str(raised.value.__cause__)
 
 
 @pytest.mark.anyio
@@ -76,10 +102,37 @@ async def test_async_chat_and_stream(cassette_path: Path, upstream: FakeUpstream
         live = await run(
             async_openai_client(cassette, transport=upstream.transport(), api_key=FAKE_OPENAI_KEY)
         )
+        # The async client drains the body after [DONE] (for HTTP/1.1 connection reuse).
+        assert all(i.response.complete for i in cassette.interactions)
     with Cassette(cassette_path, mode="none") as cassette:
         replayed = await run(async_openai_client(cassette))
     assert replayed == live
     assert upstream.calls == 2
+
+
+@pytest.mark.anyio
+async def test_an_async_stream_abandoned_while_recording(
+    cassette_path: Path, upstream: FakeUpstream
+) -> None:
+    with Cassette(cassette_path, mode="record") as cassette:
+        client = async_openai_client(
+            cassette, transport=upstream.transport(), api_key=FAKE_OPENAI_KEY
+        )
+        stream = await client.chat.completions.create(
+            model="gpt-4o-mini", messages=MESSAGES, stream=True
+        )
+        async with stream:
+            async for _ in stream:
+                break
+        (recorded,) = cassette.interactions
+    assert not recorded.response.complete
+    with Cassette(cassette_path, mode="none") as cassette:
+        stream = await async_openai_client(cassette).chat.completions.create(
+            model="gpt-4o-mini", messages=MESSAGES, stream=True
+        )
+        with pytest.raises(openai.APIConnectionError):
+            async for _ in stream:
+                pass
 
 
 def test_responses_api(cassette_path: Path, upstream: FakeUpstream) -> None:

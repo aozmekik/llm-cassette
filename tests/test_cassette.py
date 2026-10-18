@@ -226,6 +226,20 @@ def test_abandoned_and_unstarted_recordings_are_not_saved(cassette_path: Path) -
     assert only.request.json() == {"p": "kept"}
 
 
+def test_unfinished_recordings_are_saved_as_incomplete(cassette_path: Path) -> None:
+    with Cassette(cassette_path, mode="record") as cassette:
+        finished = cassette.resolve(req("finished"))
+        assert isinstance(finished, Recording)
+        finished.start(200, [], delay_ms=0)
+        finished.add_chunk(b"all", delay_ms=0)
+        finished.finish()
+        record(cassette, req("unfinished"))
+    first, second = Cassette(cassette_path, mode="none").interactions
+    assert first.response.complete
+    assert not second.response.complete
+    assert second.response.body == b"ok"
+
+
 def test_chunks_arriving_after_a_save_are_saved_next_time(cassette_path: Path) -> None:
     cassette = Cassette(cassette_path, mode="record")
     recording = cassette.resolve(req())

@@ -30,6 +30,8 @@ from llm_cassette._transport import (
     decoded_body_headers,
     passthrough_extensions,
     snapshot_request,
+    text_headers,
+    wire_headers,
 )
 
 __all__ = ["AsyncCassetteTransport", "CassetteTransport"]
@@ -41,27 +43,48 @@ __all__ = ["AsyncCassetteTransport", "CassetteTransport"]
 
 
 class _ReplayStream(httpx.SyncByteStream):
-    def __init__(self, plan: ReplayPlan, sleep: Callable[[float], None]) -> None:
+    def __init__(
+        self, plan: ReplayPlan, sleep: Callable[[float], None], request: httpx.Request
+    ) -> None:
         self._chunks = iter(plan.chunks)
+        self._truncated = plan.truncated
         self._sleep = sleep
+        self._request = request
 
     def __iter__(self) -> Iterator[bytes]:
         for data, delay in self._chunks:
             if delay > 0:
                 self._sleep(delay)
             yield data
+        if self._truncated is not None:
+            raise httpx.ReadError(self._truncated, request=self._request)
 
 
 class _AsyncReplayStream(httpx.AsyncByteStream):
-    def __init__(self, plan: ReplayPlan, sleep: Callable[[float], Awaitable[None]]) -> None:
+    def __init__(
+        self,
+        plan: ReplayPlan,
+        sleep: Callable[[float], Awaitable[None]],
+        request: httpx.Request,
+    ) -> None:
         self._chunks = iter(plan.chunks)
+        self._truncated = plan.truncated
         self._sleep = sleep
+        self._request = request
 
     async def __aiter__(self) -> AsyncGenerator[bytes]:
         for data, delay in self._chunks:
             if delay > 0:
                 await self._sleep(delay)
             yield data
+        if self._truncated is not None:
+            raise httpx.ReadError(self._truncated, request=self._request)
+
+
+# A recording is finished only when the upstream body is exhausted while the client reads it. A
+# client that closes the response first (or is interrupted by Ctrl-C or a cancellation) leaves
+# it incomplete, so it replays with a read error past the recorded end instead of passing for a
+# whole response. An exception from the upstream itself abandons the recording.
 
 
 class _RecordingStream(httpx.SyncByteStream):
@@ -70,6 +93,7 @@ class _RecordingStream(httpx.SyncByteStream):
         self._recording = recording
         self._watch = watch
         self._chunks: Iterator[bytes] | None = None
+        self._closed = False
 
     def __iter__(self) -> Iterator[bytes]:
         if self._chunks is None:
@@ -82,8 +106,11 @@ class _RecordingStream(httpx.SyncByteStream):
             # A body that failed half-way would replay as a silently truncated success.
             self._recording.abandon()
             raise
+        if not self._closed:
+            self._recording.finish()
 
     def close(self) -> None:
+        self._closed = True
         if isinstance(self._chunks, Generator):
             self._chunks.close()
         self._upstream.close()
@@ -95,6 +122,7 @@ class _AsyncRecordingStream(httpx.AsyncByteStream):
         self._recording = recording
         self._watch = watch
         self._chunks: AsyncIterator[bytes] | None = None
+        self._closed = False
 
     async def __aiter__(self) -> AsyncGenerator[bytes]:
         if self._chunks is None:
@@ -106,8 +134,11 @@ class _AsyncRecordingStream(httpx.AsyncByteStream):
         except Exception:
             self._recording.abandon()
             raise
+        if not self._closed:
+            self._recording.finish()
 
     async def aclose(self) -> None:
+        self._closed = True
         if isinstance(self._chunks, AsyncGenerator):
             await self._chunks.aclose()
         await self._upstream.aclose()
@@ -151,15 +182,19 @@ class CassetteTransport(httpx.BaseTransport):
         """Replay a recorded response for ``request``, or forward and record it."""
         outcome = self._cassette.resolve(
             snapshot_request(
-                request.method, str(request.url), request.headers.multi_items(), request.read()
+                request.method, str(request.url), text_headers(request.headers.raw), request.read()
             )
         )
         if isinstance(outcome, Interaction):
-            plan = ReplayPlan.build(outcome, self._cassette.timing_scale)
+            plan = ReplayPlan.build(
+                outcome, self._cassette.timing_scale, method=request.method, url=str(request.url)
+            )
             if plan.headers_delay > 0:
                 self._sleep(plan.headers_delay)
             return httpx.Response(
-                plan.status, headers=plan.headers, stream=_ReplayStream(plan, self._sleep)
+                plan.status,
+                headers=plan.headers,
+                stream=_ReplayStream(plan, self._sleep, request),
             )
         watch = Stopwatch(self._clock)
         try:
@@ -167,11 +202,11 @@ class CassetteTransport(httpx.BaseTransport):
         except BaseException:
             outcome.abandon()
             raise
-        headers = decoded_body_headers(upstream.headers.multi_items())
+        headers = decoded_body_headers(text_headers(upstream.headers.raw))
         outcome.start(upstream.status_code, headers, delay_ms=watch.lap_ms())
         return httpx.Response(
             upstream.status_code,
-            headers=headers,
+            headers=wire_headers(headers),
             stream=_RecordingStream(upstream, outcome, watch),
             extensions=passthrough_extensions(upstream.extensions),
         )
@@ -224,16 +259,20 @@ class AsyncCassetteTransport(httpx.AsyncBaseTransport):
             snapshot_request(
                 request.method,
                 str(request.url),
-                request.headers.multi_items(),
+                text_headers(request.headers.raw),
                 await request.aread(),
             )
         )
         if isinstance(outcome, Interaction):
-            plan = ReplayPlan.build(outcome, self._cassette.timing_scale)
+            plan = ReplayPlan.build(
+                outcome, self._cassette.timing_scale, method=request.method, url=str(request.url)
+            )
             if plan.headers_delay > 0:
                 await self._sleep(plan.headers_delay)
             return httpx.Response(
-                plan.status, headers=plan.headers, stream=_AsyncReplayStream(plan, self._sleep)
+                plan.status,
+                headers=plan.headers,
+                stream=_AsyncReplayStream(plan, self._sleep, request),
             )
         watch = Stopwatch(self._clock)
         try:
@@ -241,11 +280,11 @@ class AsyncCassetteTransport(httpx.AsyncBaseTransport):
         except BaseException:
             outcome.abandon()
             raise
-        headers = decoded_body_headers(upstream.headers.multi_items())
+        headers = decoded_body_headers(text_headers(upstream.headers.raw))
         outcome.start(upstream.status_code, headers, delay_ms=watch.lap_ms())
         return httpx.Response(
             upstream.status_code,
-            headers=headers,
+            headers=wire_headers(headers),
             stream=_AsyncRecordingStream(upstream, outcome, watch),
             extensions=passthrough_extensions(upstream.extensions),
         )

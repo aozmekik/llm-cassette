@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import json
 import random
 import textwrap
@@ -155,6 +156,32 @@ def test_awkward_multiline_strings_survive(text: str) -> None:
     assert loaded.response.chunks == chunks
 
 
+@pytest.mark.parametrize("fmt", FORMATS)
+def test_incomplete_responses_are_marked(fmt: Format) -> None:
+    complete = interaction()
+    incomplete = Interaction(
+        complete.request, dataclasses.replace(complete.response, complete=False)
+    )
+    text = dumps([complete, incomplete], fmt)
+    assert text.count("complete") == 1, "only the exception is written"
+    assert roundtrip([complete, incomplete], fmt) == [complete, incomplete]
+
+
+def test_incomplete_is_written_before_the_chunks() -> None:
+    item = interaction()
+    text = dumps(
+        [Interaction(item.request, dataclasses.replace(item.response, complete=False))], "yaml"
+    )
+    assert "      delay_ms: 12.0\n      complete: false\n      chunks:\n" in text
+
+
+@pytest.mark.parametrize("fmt", FORMATS)
+def test_header_bytes_survive_as_latin1_text(fmt: Format) -> None:
+    value = 'attachment; filename="résumé.pdf"'.encode().decode("latin-1")
+    item = interaction(headers=(("content-disposition", value),))
+    assert roundtrip([item], fmt) == [item]
+
+
 def test_an_overflowing_json_number_is_stored_as_text() -> None:
     body = b'{"temperature": 1e400}'
     (loaded,) = roundtrip([interaction(body=body)], "yaml")
@@ -214,6 +241,8 @@ def _with(path: str, value: object) -> str:
         ("response.chunks.0.text", 1, "expected a string"),
         ("response.chunks.0.base64", "AA==", "exactly one of base64 or text"),
         ("response.extra", 1, "unknown key"),
+        ("response.complete", "no", "expected true or false"),
+        ("response.complete", 0, "expected true or false"),
         ("request.method", None, "expected a string, got nothing"),
         ("request.headers", ["a"], "expected a mapping"),
         ("request.headers", {"a": 1}, "expected a string"),

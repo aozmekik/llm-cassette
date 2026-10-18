@@ -13,6 +13,7 @@ The on-disk document is::
           status: 200
           headers: {name: value | [values]}
           delay_ms: 312.5                         # request sent -> headers received
+          complete: false                         # only when the body was not read to its end
           chunks:
             - delay_ms: 0.4                       # since the previous chunk
               text: "..."                         # or base64: "..."
@@ -125,11 +126,12 @@ def _dump_interaction(interaction: Interaction) -> _Document:
         "status": response.status,
         "headers": _dump_headers(response.headers),
         "delay_ms": _delay(response.delay_ms),
-        "chunks": [
-            {"delay_ms": _delay(chunk.delay_ms), **_dump_bytes(chunk.data)}
-            for chunk in response.chunks
-        ],
     }
+    if not response.complete:
+        response_doc["complete"] = False
+    response_doc["chunks"] = [
+        {"delay_ms": _delay(chunk.delay_ms), **_dump_bytes(chunk.data)} for chunk in response.chunks
+    ]
     return {"request": request_doc, "response": response_doc}
 
 
@@ -182,6 +184,11 @@ class _Reader:
     def status(self, value: object, where: str) -> int:
         if not isinstance(value, int) or isinstance(value, bool) or not 100 <= value <= 999:  # noqa: PLR2004
             raise self.fail(where, f"expected an HTTP status code, got {value!r}")
+        return value
+
+    def boolean(self, value: object, where: str) -> bool:
+        if not isinstance(value, bool):
+            raise self.fail(where, f"expected true or false, got {value!r}")
         return value
 
     def delay(self, value: object, where: str) -> float:
@@ -260,7 +267,9 @@ class _Reader:
         request = self.mapping(entry.get("request"), f"{where}.request")
         self.known_keys(request, {"method", "url", "headers", "body"}, f"{where}.request")
         response = self.mapping(entry.get("response"), f"{where}.response")
-        self.known_keys(response, {"status", "headers", "delay_ms", "chunks"}, f"{where}.response")
+        self.known_keys(
+            response, {"status", "headers", "delay_ms", "complete", "chunks"}, f"{where}.response"
+        )
         chunks = tuple(
             self.chunk(chunk, f"{where}.response.chunks[{i}]")
             for i, chunk in enumerate(
@@ -283,6 +292,7 @@ class _Reader:
                 headers=self.headers(response.get("headers", {}), f"{where}.response.headers"),
                 chunks=chunks,
                 delay_ms=self.delay(response.get("delay_ms", 0.0), f"{where}.response.delay_ms"),
+                complete=self.boolean(response.get("complete", True), f"{where}.response.complete"),
             ),
         )
 

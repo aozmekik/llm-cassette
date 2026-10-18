@@ -9,7 +9,29 @@ from typing import TypeAlias
 from llm_cassette._json import JSONDocument, parse_document
 
 Headers: TypeAlias = tuple[tuple[str, str], ...]
-"""Header pairs with lower-case names, sorted by name; repeated headers keep their order."""
+"""Header pairs with lower-case names, sorted by name; repeated headers keep their order.
+
+Values hold the raw header bytes decoded as ISO-8859-1 (latin-1), the convention WSGI uses
+(PEP 3333): every byte maps to one character, so any value round-trips exactly. For the usual
+ASCII values this is simply the text of the header.
+"""
+
+
+def header_bytes(value: str) -> bytes:
+    """The wire bytes of a header value stored under the :data:`Headers` convention.
+
+    A value with characters beyond U+00FF cannot have come from the wire; it was typed into a
+    cassette by hand, and is sent as UTF-8.
+    """
+    try:
+        return value.encode("latin-1")
+    except UnicodeEncodeError:
+        return value.encode("utf-8")
+
+
+def header_text(raw: bytes) -> str:
+    """Store the wire bytes of a header value under the :data:`Headers` convention."""
+    return raw.decode("latin-1")
 
 
 def normalize_headers(items: Iterable[tuple[str, str]]) -> Headers:
@@ -74,12 +96,18 @@ class RecordedResponse:
             are dropped when the body was decoded during recording.
         chunks: The body, split exactly where the upstream split it.
         delay_ms: Milliseconds between sending the request and receiving the response headers.
+        complete: Whether the client read the body to its end while it was recorded. It is
+            ``False`` when the client closed the response early (``openai``'s sync client stops
+            at ``data: [DONE]``) or the recording was interrupted (Ctrl-C, cancellation). A
+            replayed incomplete response serves the recorded chunks and then fails with a read
+            error if the client reads further, because the rest of the body was never recorded.
     """
 
     status: int
     headers: Headers = ()
     chunks: tuple[Chunk, ...] = ()
     delay_ms: float = 0.0
+    complete: bool = True
 
     @property
     def body(self) -> bytes:

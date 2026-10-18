@@ -259,7 +259,18 @@ async def test_a_body_that_fails_midway_is_not_recorded_async(
         assert cassette.interactions == ()
 
 
-def test_closing_a_stream_early_records_what_was_read(lib: HttpLib, cassette_path: Path) -> None:
+def test_a_stream_read_to_the_end_is_complete(lib: HttpLib, cassette_path: Path) -> None:
+    upstream, _ = streaming_upstream(lib, [b"one", b"two"])
+    with Cassette(cassette_path, mode="record") as cassette:
+        assert sync_client(lib, cassette, upstream).get(URL).content == b"onetwo"
+        (interaction,) = cassette.interactions
+    assert interaction.response.complete
+    assert "complete" not in cassette_path.read_text(), "the default is not written"
+
+
+def test_closing_a_stream_early_records_an_incomplete_response(
+    lib: HttpLib, cassette_path: Path
+) -> None:
     upstream, _ = streaming_upstream(lib, [b"one", b"two", b"three"])
     with Cassette(cassette_path, mode="record") as cassette:
         client = sync_client(lib, cassette, upstream)
@@ -269,10 +280,26 @@ def test_closing_a_stream_early_records_what_was_read(lib: HttpLib, cassette_pat
         assert response.is_closed
         (interaction,) = cassette.interactions
     assert [chunk.data for chunk in interaction.response.chunks] == [b"one"]
+    assert not interaction.response.complete
+    assert "complete: false" in cassette_path.read_text()
+
+    with Cassette(cassette_path, mode="none", allow_repeats=True) as cassette:
+        client = sync_client(lib, cassette, exploding_upstream(lib))
+        with client.stream("GET", URL) as response:
+            assert next(response.iter_bytes()) == b"one", "closing early replays as it recorded"
+        with (
+            pytest.raises(
+                lib.http.ReadError, match=r"ends after 1 chunk\(s\) \(3 bytes\)"
+            ) as raised,
+            client.stream("GET", URL) as response,
+        ):
+            response.read()
+    assert "re-record the cassette" in str(raised.value)
+    assert raised.value.request.url == URL
 
 
 @pytest.mark.anyio
-async def test_closing_an_async_stream_early_records_what_was_read(
+async def test_closing_an_async_stream_early_records_an_incomplete_response(
     lib: HttpLib, cassette_path: Path
 ) -> None:
     upstream, _ = streaming_upstream(lib, [b"one", b"two", b"three"])
@@ -286,6 +313,68 @@ async def test_closing_an_async_stream_early_records_what_was_read(
                 break
         (interaction,) = cassette.interactions
     assert [chunk.data for chunk in interaction.response.chunks] == [b"one"]
+    assert not interaction.response.complete
+
+    with Cassette(cassette_path, mode="none") as cassette:
+        client = async_client(lib, cassette, exploding_upstream(lib))
+        with pytest.raises(lib.http.ReadError, match="re-record the cassette"):
+            await client.get(URL)
+
+
+class _InterruptedStream:
+    """Yields one chunk, then is interrupted the way Ctrl-C interrupts a blocking read."""
+
+    def __iter__(self) -> Iterator[bytes]:
+        yield b"partial"
+        raise KeyboardInterrupt
+
+
+def test_an_interrupted_recording_is_saved_as_incomplete(lib: HttpLib, cassette_path: Path) -> None:
+    stream: type = type("S", (_InterruptedStream, lib.http.SyncByteStream), {})
+    upstream = lib.http.MockTransport(lambda _: lib.http.Response(200, stream=stream()))
+    with Cassette(cassette_path, mode="record") as cassette:
+        with pytest.raises(KeyboardInterrupt):
+            sync_client(lib, cassette, upstream).get(URL)
+        (interaction,) = cassette.interactions
+    assert interaction.response.body == b"partial"
+    assert not interaction.response.complete, "not abandoned, and not passed off as complete"
+    with Cassette(cassette_path, mode="none") as cassette:
+        client = sync_client(lib, cassette, exploding_upstream(lib))
+        with pytest.raises(lib.http.ReadError, match="re-record"):
+            client.get(URL)
+
+
+@pytest.mark.anyio
+async def test_a_cancelled_async_recording_is_saved_as_incomplete(
+    lib: HttpLib, cassette_path: Path
+) -> None:
+    """A timeout (anyio.fail_after, asyncio cancellation) must not leave a complete-looking body."""
+
+    class Stalling(lib.http.AsyncByteStream):  # type: ignore[name-defined, misc]
+        async def __aiter__(self) -> AsyncIterator[bytes]:
+            yield b"first"
+            await anyio.Event().wait()  # the upstream stalls until the read is cancelled
+            yield b"never"  # pragma: no cover
+
+    upstream = lib.http.MockTransport(lambda _: lib.http.Response(200, stream=Stalling()))
+    with Cassette(cassette_path, mode="record") as cassette:
+        async with async_client(lib, cassette, upstream).stream("GET", URL) as response:
+            with anyio.CancelScope() as scope:
+                async for chunk in response.aiter_bytes():
+                    assert chunk == b"first"
+                    scope.cancel()  # takes effect at the upstream's next checkpoint
+            assert scope.cancelled_caught
+        (interaction,) = cassette.interactions
+    assert interaction.response.body == b"first"
+    assert not interaction.response.complete
+
+    with Cassette(cassette_path, mode="none") as cassette:
+        client = async_client(lib, cassette, exploding_upstream(lib))
+        async with client.stream("GET", URL) as response:
+            iterator = response.aiter_bytes()
+            assert await anext(iterator) == b"first"
+            with pytest.raises(lib.http.ReadError, match="ends after 1 chunk"):
+                await anext(iterator)
 
 
 def test_unmatched_requests_raise_through_the_client(lib: HttpLib, cassette_path: Path) -> None:
@@ -330,6 +419,51 @@ def test_a_default_upstream_is_created_lazily_when_recording(
     async_transport = lib.adapter.AsyncCassetteTransport(Cassette(cassette_path, mode="record"))
     assert isinstance(async_transport._upstream(), lib.http.AsyncHTTPTransport)
     anyio.run(async_transport.aclose)
+
+
+@pytest.mark.parametrize(
+    ("raw", "decoded"),
+    [
+        ('attachment; filename="résumé.pdf"'.encode(), 'attachment; filename="résumé.pdf"'),
+        (
+            'attachment; filename="résumé.pdf"'.encode("latin-1"),
+            'attachment; filename="résumé.pdf"',
+        ),
+    ],
+    ids=["utf-8", "latin-1"],
+)
+def test_non_ascii_response_headers(
+    lib: HttpLib, cassette_path: Path, raw: bytes, decoded: str
+) -> None:
+    def handler(_: Any) -> Any:
+        return lib.http.Response(200, headers=[(b"content-disposition", raw)], content=b"%PDF")
+
+    direct = lib.http.Client(transport=lib.http.MockTransport(handler)).get(URL)
+    assert direct.headers["content-disposition"] == decoded
+    with Cassette(cassette_path, mode="record") as cassette:
+        live = sync_client(lib, cassette, lib.http.MockTransport(handler)).get(URL)
+        (interaction,) = cassette.interactions
+    assert live.headers["content-disposition"] == decoded
+    assert interaction.response.header("content-disposition") == raw.decode("latin-1")
+    with Cassette(cassette_path, mode="none") as cassette:
+        replayed = sync_client(lib, cassette, exploding_upstream(lib)).get(URL)
+
+    def raw_pairs(response: Any) -> list[tuple[bytes, bytes]]:
+        return sorted((name.lower(), value) for name, value in response.headers.raw)
+
+    assert raw_pairs(replayed) == raw_pairs(direct), "the bytes survive the round trip"
+
+
+def test_hand_edited_header_text_replays_as_utf8(lib: HttpLib, cassette_path: Path) -> None:
+    cassette_path.parent.mkdir(parents=True)
+    cassette_path.write_text(
+        "version: 1\ninteractions:\n- request: {method: GET, url: 'https://api.example.com/v1/chat/completions'}\n"
+        "  response: {status: 200, headers: {x-note: 'şeker'}}\n",
+        encoding="utf-8",
+    )
+    with Cassette(cassette_path, mode="none") as cassette:
+        response = sync_client(lib, cassette, None).get(URL)
+    assert response.headers.raw[0] == (b"x-note", "şeker".encode())
 
 
 @pytest.mark.anyio
@@ -405,15 +539,20 @@ async def test_async_upstream_errors_record_nothing(lib: HttpLib, cassette_path:
         assert cassette.interactions == ()
 
 
-def test_a_stream_closed_before_reading_records_an_empty_body(
-    lib: HttpLib, cassette_path: Path
-) -> None:
+def test_a_stream_closed_before_reading_records_no_body(lib: HttpLib, cassette_path: Path) -> None:
     upstream, _ = streaming_upstream(lib, [b"never read"])
     with Cassette(cassette_path, mode="record") as cassette:
         with sync_client(lib, cassette, upstream).stream("GET", URL) as response:
             assert response.status_code == 200
         (interaction,) = cassette.interactions
     assert interaction.response.chunks == ()
+    assert not interaction.response.complete
+    with Cassette(cassette_path, mode="none", allow_repeats=True) as cassette:
+        client = sync_client(lib, cassette, None)
+        with client.stream("GET", URL) as response:
+            assert response.status_code == 200, "a client that never reads replays fine"
+        with pytest.raises(lib.http.ReadError, match=r"ends after 0 chunk\(s\)"):
+            client.get(URL)
 
 
 @pytest.mark.anyio
@@ -424,3 +563,16 @@ async def test_an_async_stream_closed_before_reading(lib: HttpLib, cassette_path
             assert response.status_code == 200
         (interaction,) = cassette.interactions
     assert interaction.response.chunks == ()
+    assert not interaction.response.complete
+
+
+def test_reading_a_closed_recording_again_does_not_complete_it(
+    lib: HttpLib, cassette_path: Path
+) -> None:
+    upstream, _ = streaming_upstream(lib, [b"one", b"two"])
+    with Cassette(cassette_path, mode="record") as cassette:
+        with sync_client(lib, cassette, upstream).stream("GET", URL) as response:
+            assert next(response.iter_bytes()) == b"one"
+        assert list(response.stream) == [], "the stream is single-pass and already closed"
+        (interaction,) = cassette.interactions
+    assert not interaction.response.complete
