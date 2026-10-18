@@ -250,6 +250,12 @@ def llm_cassette_config():
         ("name=3", "name must be a str, got int"),
         ("ignore_paths='metadata'", "ignore_paths must be a list of paths"),
         ("mode='sometimes'", "unknown record mode 'sometimes'"),
+        ("timing_scale='fast'", "timing_scale must be a finite number >= 0, got 'fast'"),
+        ("timing_scale=True", "timing_scale must be a finite number >= 0, got True"),
+        ("timing_scale=-1", "timing_scale must be a finite number >= 0, got -1"),
+        ("timing_scale=float('nan')", "timing_scale must be a finite number >= 0, got nan"),
+        ("allow_repeats='no'", "allow_repeats must be a bool, got str"),
+        ("allow_unmatched=1", "allow_unmatched must be a bool, got int"),
     ],
 )
 def test_marker_misuse_is_reported(project: pytest.Pytester, marker: str, message: str) -> None:
@@ -265,6 +271,34 @@ def test_marker_misuse_is_reported(project: pytest.Pytester, marker: str, messag
     result = project.runpytest()
     result.assert_outcomes(errors=1)
     result.stdout.fnmatch_lines([f"*{message}*"])
+
+
+def test_none_means_not_set(project: pytest.Pytester) -> None:
+    """The registered marker signature shows None defaults, so passing them must work."""
+    project.makeconftest(
+        CONFTEST
+        + """
+
+@pytest.fixture
+def llm_cassette_config():
+    return {"timing_scale": None, "matching": None}
+"""
+    )
+    project.makepyfile(
+        test_demo="""
+        import pytest
+
+        @pytest.mark.llm_cassette(
+            None, mode=None, matching=None, redaction=None, ignore_paths=None,
+            timing_scale=None, allow_repeats=None, allow_unmatched=None,
+        )
+        def test_chat(ask, llm_cassette):
+            assert llm_cassette.timing_scale == 0.0
+            assert llm_cassette.path.name == "test_chat.yaml"
+            ask("hi")
+        """
+    )
+    project.runpytest().assert_outcomes(passed=1)
 
 
 def test_unknown_config_keys_are_reported(project: pytest.Pytester) -> None:
@@ -338,6 +372,23 @@ def test_a_swallowed_unmatched_request_still_fails_the_test(project: pytest.Pyte
             "*no recorded interaction matches POST*",
         ]
     )
+
+
+def test_allow_unmatched_lets_a_test_check_the_miss_path(project: pytest.Pytester) -> None:
+    project.makepyfile(
+        test_demo="""
+        import openai
+        import pytest
+        from llm_cassette import UnmatchedRequestError
+
+        @pytest.mark.llm_cassette(mode="none", allow_unmatched=True)
+        def test_an_unrecorded_prompt_fails_loudly(ask, llm_cassette):
+            with pytest.raises((openai.APIConnectionError, UnmatchedRequestError)):
+                ask("never recorded")
+            assert len(llm_cassette.unmatched) == 1
+        """
+    )
+    project.runpytest().assert_outcomes(passed=1)
 
 
 def test_secrets_from_the_environment_never_reach_disk(

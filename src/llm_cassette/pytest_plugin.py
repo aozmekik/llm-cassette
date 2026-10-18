@@ -7,7 +7,8 @@ Options, from lowest to highest precedence:
 1. ini options ``llm_record_mode``, ``llm_cassette_dir``, ``llm_cassette_format`` and
    ``llm_secret_env``;
 2. an ``llm_cassette_config`` fixture override returning a :class:`CassetteConfig`;
-3. ``@pytest.mark.llm_cassette(...)`` markers (module, then class, then function);
+3. ``@pytest.mark.llm_cassette(...)`` markers (module, then class, then function); an option
+   given as ``None`` counts as not given;
 4. ``--llm-record-mode`` on the command line, which always wins so that CI can force ``none``.
 """
 
@@ -15,6 +16,7 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import math
 import os
 import re
 from collections.abc import Generator, Iterable, Iterator
@@ -52,7 +54,7 @@ class CassetteConfig(TypedDict, total=False):
 
 
 _CONFIG_KEYS = frozenset(CassetteConfig.__optional_keys__)
-_MARKER_KEYS = _CONFIG_KEYS | {"name", "ignore_paths"}
+_MARKER_KEYS = _CONFIG_KEYS | {"name", "ignore_paths", "allow_unmatched"}
 _SUFFIXES = {"yaml": ".yaml", "json": ".json"}
 _UNSAFE_FILENAME_CHARS = re.compile(r"[^A-Za-z0-9_.\-\[\]]+")
 _MAX_FILENAME = 120
@@ -126,8 +128,9 @@ def pytest_configure(config: pytest.Config) -> None:
     """Register the marker, validate ini options and load the price table."""
     config.addinivalue_line(
         "markers",
-        "llm_cassette(name=None, *, mode=None, matching=None, redaction=None, ignore_paths=(), "
-        "timing_scale=None, allow_repeats=None): configure the llm_cassette fixture",
+        "llm_cassette(name=None, *, mode=None, matching=None, redaction=None, ignore_paths=None, "
+        "timing_scale=None, allow_repeats=None, allow_unmatched=None): configure the "
+        "llm_cassette fixture",
     )
     mode = config.getini("llm_record_mode")
     if mode not in {m.value for m in RecordMode}:
@@ -171,6 +174,7 @@ class _Options:
     redaction: Redaction
     timing_scale: float
     allow_repeats: bool
+    allow_unmatched: bool
 
 
 def _marker_options(item: pytest.Item) -> dict[str, Any]:
@@ -181,8 +185,8 @@ def _marker_options(item: pytest.Item) -> dict[str, Any]:
             pytest.fail(
                 "llm_cassette accepts at most one positional argument (name)", pytrace=False
             )
-        options = dict(marker.kwargs)
-        if marker.args:
+        options = {key: value for key, value in marker.kwargs.items() if value is not None}
+        if marker.args and marker.args[0] is not None:
             if "name" in options:
                 pytest.fail(
                     "llm_cassette got the name both positionally and by keyword", pytrace=False
@@ -203,6 +207,17 @@ def _expect(value: object, kind: type[_T], what: str) -> _T:
     if not isinstance(value, kind):
         pytest.fail(f"{what} must be a {kind.__name__}, got {type(value).__name__}", pytrace=False)
     return value
+
+
+def _real_number(value: object, what: str) -> float:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int | float)
+        or not math.isfinite(value)
+        or value < 0
+    ):
+        pytest.fail(f"{what} must be a finite number >= 0, got {value!r}", pytrace=False)
+    return float(value)
 
 
 def _safe_filename(name: str) -> str:
@@ -271,7 +286,10 @@ def _resolve(request: pytest.FixtureRequest, defaults: CassetteConfig) -> _Optio
             f"llm_cassette_config returned unknown key(s) {', '.join(unknown)}", pytrace=False
         )
     marker = _marker_options(request.node)
-    combined: dict[str, Any] = {**defaults, **marker}
+    combined: dict[str, Any] = {
+        **{key: value for key, value in defaults.items() if value is not None},
+        **marker,
+    }
 
     mode = (
         config.getoption("llm_record_mode")
@@ -305,8 +323,9 @@ def _resolve(request: pytest.FixtureRequest, defaults: CassetteConfig) -> _Optio
         mode=record_mode,
         matching=matching,
         redaction=redaction,
-        timing_scale=float(combined.get("timing_scale", 0.0)),
-        allow_repeats=bool(combined.get("allow_repeats", False)),
+        timing_scale=_real_number(combined.get("timing_scale", 0.0), "timing_scale"),
+        allow_repeats=_expect(combined.get("allow_repeats", False), bool, "allow_repeats"),
+        allow_unmatched=_expect(marker.get("allow_unmatched", False), bool, "allow_unmatched"),
     )
 
 
@@ -325,7 +344,7 @@ def llm_cassette(
     The cassette path is derived from the test's node id (see :func:`cassette_path`) and must not
     be shared with another test. If the code under test swallowed an
     :class:`~llm_cassette.UnmatchedRequestError` (SDKs wrap transport errors), the test still
-    fails at teardown.
+    fails at teardown, unless its marker says ``allow_unmatched=True``.
     """
     options = _resolve(request, llm_cassette_config)
     _claim(request.config, options.path, request.node.nodeid)
@@ -341,11 +360,18 @@ def llm_cassette(
     cassette.save()
     request.config.stash[_USAGE_LOG].add(request.node.nodeid, cassette.played)
     call_report = request.node.stash.get(_PHASE_REPORTS, {}).get("call")
-    if cassette.unmatched and call_report is not None and call_report.passed:
+    if (
+        cassette.unmatched
+        and not options.allow_unmatched
+        and call_report is not None
+        and call_report.passed
+    ):
         count = len(cassette.unmatched)
         pytest.fail(
             f"{count} request(s) did not match the cassette, although the test passed (the code "
-            f"under test probably caught the error):\n\n{cassette.unmatched[0]}",
+            "under test probably caught the error; mark the test with "
+            "@pytest.mark.llm_cassette(allow_unmatched=True) if that is what it checks):"
+            f"\n\n{cassette.unmatched[0]}",
             pytrace=False,
         )
 
