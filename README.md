@@ -33,11 +33,12 @@ as a cassette diff.
 - **Matching** on method, normalized URL and canonical JSON body, with ignore paths
   (`metadata.user_id`, `messages.*.cache_control`), ignored query parameters, header matching and
   custom matchers. A miss raises `UnmatchedRequestError` with a diff against the closest recording.
-- **Redaction before anything is stored**: `authorization`, `x-api-key`, `openai-organization`,
-  `openai-project`, `cookie`, `set-cookie` and any header or query parameter whose name contains
-  `key`, `token` or `secret` (in the request URL and in `location`-style headers), URL user
-  info, JSON body paths, and literal secret values, including their JSON-escaped and
-  percent-encoded forms. A final check refuses to write a cassette in which a secret survived.
+- **Redaction before anything is stored**: `authorization`, `proxy-authorization`, `x-api-key`,
+  `openai-organization`, `openai-project`, `anthropic-organization-id`, `cookie`, `set-cookie` and
+  any header or query parameter whose name contains `key`, `token` or `secret` (in the request
+  URL and in `location`-style headers), URL user info, JSON body paths, and literal secret values,
+  including their JSON-escaped and percent-encoded forms. A final check refuses to write a
+  cassette in which a secret survived.
 - **Readable, deterministic cassettes**: one YAML (or JSON) file per test, schema-versioned, sorted
   keys and headers, decoded bodies, multi-line strings as literal blocks.
 - **pytest plugin**: `llm_cassette` fixture, `@pytest.mark.llm_cassette(...)`,
@@ -172,8 +173,6 @@ structurally, so key order and whitespace never matter, but `true` and `1` do. I
 replay in recording order.
 
 ```python
-from llm_cassette import Matching
-
 from llm_cassette import Matching, RecordedRequest
 
 
