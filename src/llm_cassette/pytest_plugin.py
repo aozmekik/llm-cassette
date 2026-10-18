@@ -261,9 +261,10 @@ def _real_number(value: object, what: str) -> float:
 def _safe_filename(name: str) -> str:
     """A portable file name for ``name``, distinct for distinct names.
 
-    Characters outside ``[A-Za-z0-9_.-[]]`` become ``_``. Whenever that changes the name (or it
-    is too long), a short hash of the original is appended, so ``What is 2+2?`` and
-    ``What is 2*2?`` do not end up in the same file.
+    Each run of characters outside ``[A-Za-z0-9_.-[]]`` becomes one ``_``, and leading and
+    trailing ``.`` and ``_`` are dropped. Whenever that changes the name (or it is too long), a
+    short hash of the original is appended, so ``What is 2+2?`` and ``What is 2*2?`` do not end
+    up in the same file.
     """
     safe = _UNSAFE_FILENAME_CHARS.sub("_", name).strip("._") or "cassette"
     if safe == name and len(safe) <= _MAX_FILENAME:

@@ -148,9 +148,10 @@ Settings are applied from lowest to highest precedence:
 4. `--llm-record-mode` on the command line, which overrides everything, so CI can force `none`.
 
 The cassette of `tests/test_chat.py::TestStream::test_tokens[gpt-4o-mini]` is
-`tests/cassettes/test_chat/TestStream.test_tokens[gpt-4o-mini].yaml`. Characters other than
-`A-Z a-z 0-9 _ . - [ ]` become `_`, and when that changes a name a short hash of the original is
-appended, so the ids `What is 2+2?` and `What is 2*2?` get separate files
+`tests/cassettes/test_chat/TestStream.test_tokens[gpt-4o-mini].yaml`. Each run of characters
+other than `A-Z a-z 0-9 _ . - [ ]` becomes one `_`, leading and trailing `.` and `_` are dropped,
+and when that changes a name (or it is longer than 120 characters) a short hash of the original
+is appended, so the ids `What is 2+2?` and `What is 2*2?` get separate files
 (`test_x[What_is_2_2_]-<hash>.yaml`). With an absolute `llm_cassette_dir`, the folders mirror the
 test files' paths below the rootdir.
 
