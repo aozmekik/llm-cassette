@@ -25,9 +25,17 @@ Questions and the options considered:
 - One file per test, with a top-level `version: 1` schema version. Loading rejects unknown
   versions and unknown keys with an error that names the offending location.
 - Responses are stored as the list of chunks the client received, after `content-encoding` was
-  decoded (so `content-encoding` and `content-length` are dropped), each chunk with its delay in
-  milliseconds rounded to 0.1. A chunk that is valid UTF-8 is stored as text, anything else as
-  base64, per chunk, so a multi-byte character split across two network reads stays exact.
+  decoded, each chunk with its delay in milliseconds rounded to 0.1. When the body was encoded
+  (gzip, br, zstd), `content-encoding` and `content-length` are dropped, because they describe
+  bytes the cassette does not hold; an identity-encoded body keeps its `content-length`, which
+  redaction adjusts when it changes the body. A chunk that is valid UTF-8 is stored as text,
+  anything else as base64, per chunk, so a multi-byte character split across two network reads
+  stays exact. A response whose body the client did not read to the end carries
+  `complete: false` ([ADR 5](0005-incomplete-recordings.md)).
+- Header values are stored as their raw bytes decoded as ISO-8859-1, the convention WSGI uses:
+  every byte maps to one character, so a UTF-8 or Latin-1 value round-trips exactly, while ASCII
+  values (nearly all of them) read as themselves. Text beyond U+00FF, which can only come from a
+  hand edit, is sent as UTF-8.
 - JSON request bodies (objects and arrays) are stored as structured data with sorted keys; other
   bodies as text or base64. Connection-level request headers (`host`, `content-length`,
   `connection`, ...) are not stored.
@@ -38,11 +46,18 @@ Questions and the options considered:
   those characters into line breaks or spaces in any other scalar style. Property tests round-trip
   arbitrary text, bytes and JSON documents through the format.
 - Redaction runs before an interaction is matched, exposed or written, and a final scan refuses to
-  write a file that still contains a configured secret.
+  write a file that still contains a configured secret, also in decoded JSON strings,
+  percent-decoded text and the serialized file itself.
+- JSON numbers that do not fit in a float (`1e400`) make a body opaque text rather than JSON, so
+  a cassette that can be written can always be read back.
 
 ## Consequences
 
-- Diffs are small and readable: re-recording the same traffic changes only the measured delays.
+- Diffs are small and readable, but re-recording is not byte-stable: besides the measured delays,
+  it changes volatile request fields that matching ignores (a `metadata.run_id`, say) and volatile
+  headers such as `date`, `user-agent` and the SDKs' `x-stainless-*` headers (OS, architecture,
+  Python and SDK versions). `Redaction(drop_headers=[...])` removes such headers before they are
+  stored; nothing is dropped by default, so the cassette shows what the SDK really sent.
 - Stored request bodies are canonical, not the exact bytes sent. Matching compares canonical forms
   anyway; a custom matcher that needs exact bytes cannot get them from a cassette.
 - Chunks split inside a multi-byte character appear as base64, which is exact but not readable.
