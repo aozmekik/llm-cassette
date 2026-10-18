@@ -87,8 +87,13 @@ def fake_upstream() -> httpx2.MockTransport:
 
 @pytest.fixture
 def llm_cassette_config() -> CassetteConfig:
-    """Project-wide cassette defaults: ignore per-run metadata, scrub the user field."""
+    """Project-wide cassette defaults.
+
+    Matching ignores per-run metadata; redaction scrubs the ``user`` field and drops the request
+    headers that change with the SDK, OS and Python version, so re-recording on another machine
+    does not produce a noisy diff.
+    """
     return {
         "matching": Matching(ignore_paths=["metadata.run_id"]),
-        "redaction": Redaction(body_paths=["user"]),
+        "redaction": Redaction(body_paths=["user"], drop_headers=["user-agent", "x-stainless-*"]),
     }

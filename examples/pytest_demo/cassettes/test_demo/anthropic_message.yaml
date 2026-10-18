@@ -8,18 +8,7 @@ interactions:
         accept-encoding: gzip, deflate, zstd
         anthropic-version: '2023-06-01'
         content-type: application/json
-        user-agent: Anthropic/Python 1.15.0
         x-api-key: REDACTED
-        x-stainless-arch: arm64
-        x-stainless-async: 'false'
-        x-stainless-lang: python
-        x-stainless-os: MacOS
-        x-stainless-package-version: 1.15.0
-        x-stainless-read-timeout: '600'
-        x-stainless-retry-count: '0'
-        x-stainless-runtime: CPython
-        x-stainless-runtime-version: 3.14.5
-        x-stainless-timeout: '600'
       body:
         json:
           max_tokens: 64

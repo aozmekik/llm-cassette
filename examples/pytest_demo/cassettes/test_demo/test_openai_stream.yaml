@@ -8,16 +8,6 @@ interactions:
         accept-encoding: gzip, deflate, zstd
         authorization: REDACTED
         content-type: application/json
-        user-agent: OpenAI/Python 3.34.0
-        x-stainless-arch: arm64
-        x-stainless-async: 'false'
-        x-stainless-lang: python
-        x-stainless-os: MacOS
-        x-stainless-package-version: 3.34.0
-        x-stainless-read-timeout: '600'
-        x-stainless-retry-count: '0'
-        x-stainless-runtime: CPython
-        x-stainless-runtime-version: 3.14.5
       body:
         json:
           messages:
@@ -32,12 +22,13 @@ interactions:
       headers:
         content-type: text/event-stream
       delay_ms: 0.1
+      complete: false
       chunks:
         - delay_ms: 0.1
           text: |+
             data: {"id": "chatcmpl-demo", "created": 1760000000, "model": "gpt-4o-mini-2024-07-18", "object": "chat.completion.chunk", "usage": null, "choices": [{"index": 0, "delta": {"content": "Echo:"}, "finish_reason": null}]}
 
-        - delay_ms: 2.1
+        - delay_ms: 1.9
           text: |+
             data: {"id": "chatcmpl-demo", "created": 1760000000, "model": "gpt-4o-mini-2024-07-18", "object": "chat.completion.chunk", "usage": null, "choices": [{"index": 0, "delta": {"content": "akış"}, "finish_reason": null}]}
 
