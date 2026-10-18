@@ -9,7 +9,14 @@ import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
-from llm_cassette._json import MAX_DEPTH, JSONValue, canonical, parse_document, sort_keys
+from llm_cassette._json import (
+    MAX_DEPTH,
+    JSONValue,
+    canonical,
+    is_json_scalar,
+    parse_document,
+    sort_keys,
+)
 from llm_cassette._paths import JsonPath, delete_paths, parse_paths, replace_paths
 
 json_scalars = (
@@ -69,6 +76,24 @@ json_documents = st.dictionaries(st.text(max_size=8), json_values, max_size=5) |
 )
 def test_parse_document(data: bytes, expected: JSONValue) -> None:
     assert parse_document(data) == expected
+
+
+@pytest.mark.parametrize(
+    ("data", "expected"),
+    [
+        (b'"text"', True),
+        (b" 42 ", True),
+        (b"null", True),
+        (b"{}", False),
+        (b"[1]", False),
+        (b"", False),
+        (b"nope", False),
+        (b"1e400", False),
+        (b"NaN", False),
+    ],
+)
+def test_is_json_scalar(data: bytes, expected: bool) -> None:  # noqa: FBT001
+    assert is_json_scalar(data) is expected
 
 
 def test_depth_limit_is_inclusive() -> None:

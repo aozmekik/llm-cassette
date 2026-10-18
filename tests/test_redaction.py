@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
+from typing import Any
+from urllib.parse import quote, quote_plus
 
+import httpx2
 import pytest
 from hypothesis import given
 from hypothesis import strategies as st
@@ -18,6 +22,7 @@ from llm_cassette import (
     SecretLeakError,
 )
 from llm_cassette.clients import anthropic_client, openai_client
+from llm_cassette.httpx2 import CassetteTransport
 from tests.fakes import FAKE_ANTHROPIC_KEY, FAKE_OPENAI_KEY, FAKE_ORG, FakeUpstream
 
 R = "REDACTED"
@@ -72,9 +77,65 @@ def test_query_parameters_and_userinfo_are_redacted() -> None:
     url = "https://user:hunter2@api.example.com/v1/x?key=AIza-FAKE&sig=abc&model=m&access_token=t"
     redacted = redaction.redact_request(request(url=url)).url
     assert redacted == (
-        "https://user:REDACTED@api.example.com/v1/x"
+        "https://REDACTED:REDACTED@api.example.com/v1/x"
         "?key=REDACTED&sig=REDACTED&model=m&access_token=REDACTED"
     )
+
+
+@pytest.mark.parametrize(
+    ("netloc", "expected"),
+    [
+        ("sk-live-USERNAMETOKEN@api.example.com", "REDACTED@api.example.com"),
+        ("user:pw@api.example.com:8443", "REDACTED:REDACTED@api.example.com:8443"),
+        (":pw@api.example.com", ":REDACTED@api.example.com"),
+        ("user:@api.example.com", "REDACTED:@api.example.com"),
+        ("api.example.com", "api.example.com"),
+    ],
+)
+def test_all_of_the_user_info_is_redacted(netloc: str, expected: str) -> None:
+    redacted = Redaction().redact_request(request(url=f"https://{netloc}/v1/x")).url
+    assert redacted == f"https://{expected}/v1/x"
+
+
+def test_a_placeholder_is_percent_encoded_in_user_info() -> None:
+    redaction = Redaction(placeholder="<redacted>")
+    redacted = redaction.redact_request(request(url="https://token@api.example.com/")).url
+    assert redacted == "https://%3Credacted%3E@api.example.com/"
+
+
+def test_url_valued_response_headers_are_redacted() -> None:
+    presigned = (
+        "https://bucket.s3.amazonaws.com/x?X-Amz-Security-Token=TOPSECRETSTS&X-Amz-Expires=60"
+    )
+    response = RecordedResponse(
+        302,
+        (
+            ("content-location", "/v1/files/1?api_key=FAKEKEY"),
+            ("link", '<https://api.example.com/p?page=2&token=T1>; rel="next", <https://u@h/>'),
+            ("location", presigned),
+            ("x-other", "https://api.example.com/?token=kept-in-an-ordinary-header"),
+        ),
+    )
+    headers = dict(Redaction().redact_response(response).headers)
+    assert headers["location"] == (
+        "https://bucket.s3.amazonaws.com/x?X-Amz-Security-Token=REDACTED&X-Amz-Expires=60"
+    )
+    assert headers["content-location"] == "/v1/files/1?api_key=REDACTED"
+    assert headers["link"] == (
+        '<https://api.example.com/p?page=2&token=REDACTED>; rel="next", <https://REDACTED@h/>'
+    )
+    assert headers["x-other"].endswith("kept-in-an-ordinary-header")
+
+
+def test_a_malformed_url_header_is_left_alone() -> None:
+    response = RecordedResponse(302, (("location", "http://[::1/broken"),))
+    assert Redaction().redact_response(response).headers == (("location", "http://[::1/broken"),)
+
+
+def test_the_referer_request_header_is_redacted() -> None:
+    headers = (("referer", "https://app.example.com/?session_token=abc"),)
+    redacted = Redaction().redact_request(request(headers=headers))
+    assert redacted.headers == (("referer", "https://app.example.com/?session_token=REDACTED"),)
 
 
 def test_urls_without_sensitive_parts_are_untouched() -> None:
@@ -108,6 +169,83 @@ def test_response_body_paths_apply_to_json_but_not_streams() -> None:
     assert redaction.redact_response(stream) == stream
 
 
+JSON_TYPE = (("content-type", "application/json; charset=utf-8"),)
+
+
+def test_a_json_response_that_does_not_parse_is_replaced_whole() -> None:
+    """A truncated body may hold the configured fields, which cannot be located in it."""
+    truncated = RecordedResponse(
+        200,
+        JSON_TYPE,
+        (Chunk(b'{"user": {"email": "alice@example.com", "na', 1.0),),
+        complete=False,
+    )
+    redacted = Redaction(body_paths=["user.email"]).redact_response(truncated)
+    assert redacted.chunks == (Chunk(b"REDACTED", 1.0),)
+    assert not redacted.complete
+
+
+@pytest.mark.parametrize(
+    ("headers", "body"),
+    [
+        (JSON_TYPE, b'"just a string"'),
+        (JSON_TYPE, b""),
+        (JSON_TYPE, b"  \n"),
+        ((("content-type", "text/plain"),), b"user=alice"),
+        ((("content-type", "application/problem+xml"),), b"<user>alice</user>"),
+    ],
+    ids=["json-scalar", "empty", "blank", "text", "xml"],
+)
+def test_bodies_body_paths_cannot_apply_to_are_kept(
+    headers: tuple[tuple[str, str], ...], body: bytes
+) -> None:
+    response = RecordedResponse(200, headers, (Chunk(body),) if body else ())
+    assert Redaction(body_paths=["user"]).redact_response(response) == response
+
+
+def test_vendor_json_media_types_count_as_json() -> None:
+    response = RecordedResponse(
+        200, (("content-type", "application/vnd.api+json"),), (Chunk(b"{broken"),)
+    )
+    assert Redaction(body_paths=["x"]).redact_response(response).body == b"REDACTED"
+
+
+def test_content_length_follows_a_redacted_body() -> None:
+    body = json.dumps({"user": {"email": "alice@example.com"}, "id": 1}, indent=2).encode()
+    response = RecordedResponse(
+        200, (*JSON_TYPE, ("content-length", str(len(body)))), (Chunk(body),)
+    )
+    redacted = Redaction(body_paths=["user.email"]).redact_response(response)
+    assert redacted.header("content-length") == str(len(redacted.body))
+    assert len(redacted.body) < len(body)
+
+    secret = "sk-very-secret-0001"
+    echo = RecordedResponse(
+        200, (("content-length", "29"),), (Chunk(f"you sent {secret}!".encode()),)
+    )
+    redacted = Redaction(secrets=[secret]).redact_response(echo)
+    assert redacted.body == b"you sent REDACTED!"
+    assert redacted.header("content-length") == "18"
+
+
+def test_content_length_of_an_incomplete_body_keeps_the_missing_part() -> None:
+    secret = "sk-very-secret-0001"
+    partial = RecordedResponse(
+        200,
+        (("content-length", "1000"),),
+        (Chunk(f"echo {secret}".encode()),),
+        complete=False,
+    )
+    redacted = Redaction(secrets=[secret]).redact_response(partial)
+    assert redacted.header("content-length") == str(1000 - len(secret) + len("REDACTED"))
+
+
+def test_an_unparseable_content_length_is_left_alone() -> None:
+    secret = "sk-very-secret-0001"
+    response = RecordedResponse(200, (("content-length", "n/a"),), (Chunk(secret.encode()),))
+    assert Redaction(secrets=[secret]).redact_response(response).header("content-length") == "n/a"
+
+
 def test_secrets_are_replaced_everywhere() -> None:
     secret = "sk-very-secret-0001"
     redaction = Redaction(secrets=[secret], substrings=("nothing-matches",), headers=frozenset())
@@ -125,6 +263,104 @@ def test_secrets_are_replaced_everywhere() -> None:
     assert redacted.response.chunks[0].data == b"you sent REDACTED"
 
 
+SECRET = 'pässwörd-"quoted"-\\-123456'
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        json.dumps({"password": SECRET}).encode(),  # \u00e4 escapes, the json.dumps default
+        json.dumps({"password": SECRET}, ensure_ascii=False).encode(),  # only \" and \\ escaped
+        json.dumps({"tool": {"arguments": json.dumps({"password": SECRET})}}).encode(),
+        json.dumps({"password": SECRET}).replace("/", "\\/").replace("p", "\\u0070").encode(),
+    ],
+    ids=["ascii-escapes", "unicode", "nested-json-string", "unusual-escapes"],
+)
+def test_json_escaped_secrets_in_request_bodies_are_replaced(body: bytes) -> None:
+    redaction = Redaction(secrets=[SECRET])
+    redacted = redaction.redact_request(request(body=body))
+    decoded = json.dumps(json.loads(redacted.body), ensure_ascii=False)
+    assert "pässwörd" not in decoded
+    assert "pässwörd" not in redacted.body.decode()
+    assert redaction.find_secret([Interaction(redacted, RecordedResponse(200))]) is None
+
+
+def test_escaped_secrets_never_reach_the_file(tmp_path: Path) -> None:
+    """Record through httpx2 with json= and form data; grep the cassette for the secret."""
+    secret = 'Zm9v+YmFy/YmF6=-pässwörd"x'
+
+    def echo(incoming: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(200, json={"echo": incoming.content.decode()})
+
+    path = tmp_path / "c.yaml"
+    with Cassette(path, mode="record", redaction=Redaction(secrets=[secret])) as cassette:
+        client = httpx2.Client(transport=CassetteTransport(cassette, httpx2.MockTransport(echo)))
+        client.post("https://x.example.com/", json={"password": secret})
+        client.post("https://x.example.com/", params={"sig": secret}, data={"assertion": secret})
+        client.get(f"https://x.example.com/files/{quote(secret, safe='')}")
+    text = path.read_text(encoding="utf-8")
+    for form in (secret, quote_plus(secret), quote(secret, safe=""), json.dumps(secret)[1:-1]):
+        assert form not in text
+    assert text.count("REDACTED") >= 6
+
+
+def test_find_secret_looks_inside_decoded_views() -> None:
+    secret = "Zm9v+YmFy/YmF6="
+    redaction = Redaction(secrets=[secret])
+    # Lower-case percent escapes are valid, but not one of the forms that are replaced.
+    lower_case_hex = re.sub(r"%[0-9A-F]{2}", lambda m: m.group().lower(), quote_plus(secret))
+    leaked = Interaction(
+        request(url=f"https://x.example.com/?q={lower_case_hex}"), RecordedResponse(200)
+    )
+    assert redaction.redact(leaked).request.url.endswith(lower_case_hex)
+    assert redaction.find_secret([redaction.redact(leaked)]) == "interactions[0].request.url"
+    split = '{"a": "Zm9v\\u002BYmFy", "b": "/YmF6="}'
+    stream = RecordedResponse(200, (), (Chunk(b'data: {"echo": "Zm9v\\u002BYmFy/YmF6="}\n\n'),))
+    assert (
+        redaction.find_secret([Interaction(request(), stream)]) == "interactions[0].response.body"
+    )
+    assert (
+        redaction.find_secret([Interaction(request(body=split.encode()), RecordedResponse(200))])
+        is None
+    )
+    assert redaction.find_secret([], serialized=f"text: {secret}\n") == "the serialized cassette"
+    assert redaction.find_secret([], serialized="text: nothing\n") is None
+
+
+def test_escaped_secrets_are_found_anywhere_in_a_document() -> None:
+    secret = "pässwörd-123456"
+    body = json.dumps({"list": [1, None, {"deep": [f"x {secret}"]}], secret: True}).encode()
+    redacted = Redaction(secrets=[secret]).redact_request(request(body=body))
+    assert json.loads(redacted.body) == {"list": [1, None, {"deep": ["x REDACTED"]}], R: True}
+
+
+def test_text_that_only_looks_like_json_strings_is_searched_as_is() -> None:
+    redaction = Redaction(secrets=["sk-very-secret-0001"])
+    invalid_escape = b'not json: "\\q" and "sk-very-secret-0001"'
+    leaked = Interaction(request(body=invalid_escape), RecordedResponse(200))
+    assert redaction.find_secret([leaked]) == "interactions[0].request.body"
+    clean = Interaction(request(body=b'"\\q" "\\u00e4"'), RecordedResponse(200))
+    assert redaction.find_secret([clean]) is None
+
+
+def test_a_secret_inside_a_longer_secret_is_replaced_whole() -> None:
+    redaction = Redaction(secrets=["sk-short-01", "sk-short-0123456789"])
+    redacted = redaction.redact_request(request(body=b"key=sk-short-0123456789"))
+    assert redacted.body == b"key=REDACTED"
+
+
+def test_non_ascii_secrets_in_header_values_are_replaced() -> None:
+    secret = "pässwörd-123456"
+    stored = f"Basic {secret}".encode().decode("latin-1")  # how wire bytes are stored
+    redaction = Redaction(secrets=[secret], substrings=("nothing",), headers=frozenset())
+    redacted = redaction.redact_request(request(headers=(("x-custom", stored),)))
+    assert redacted.headers == (("x-custom", "Basic REDACTED"),)
+    leaked = Interaction(request(headers=(("x-custom", stored),)), RecordedResponse(200))
+    assert redaction.find_secret([leaked]) == "interactions[0].request.headers"
+    typed = redaction.redact_request(request(headers=(("x-note", f"şeker {secret}"),)))
+    assert typed.headers == (("x-note", "şeker REDACTED"),), "hand-typed text works too"
+
+
 def test_find_secret_catches_a_secret_split_across_chunks() -> None:
     secret = "sk-very-secret-0001"
     redaction = Redaction(secrets=[secret])
@@ -140,6 +376,8 @@ def test_find_secret_catches_a_secret_split_across_chunks() -> None:
         ({"secrets": [""]}, ValueError, "non-empty strings"),
         ({"secrets": ["RED"]}, ValueError, "must not contain a secret"),
         ({"placeholder": "a\nb"}, ValueError, "valid header value"),
+        ({"placeholder": "REDACTED\t"}, ValueError, "printable ASCII"),
+        ({"placeholder": "gizlendi—"}, ValueError, "printable ASCII"),
         ({"substrings": [""]}, ValueError, "redact every header"),
         ({"headers": "authorization"}, TypeError, "not a single string"),
         ({"query_params": "key"}, TypeError, "not a single string"),
@@ -152,6 +390,36 @@ def test_invalid_configuration_is_rejected(
 ) -> None:
     with pytest.raises(error, match=match):
         Redaction(**kwargs)  # type: ignore[arg-type]
+
+
+def test_the_default_headers_can_be_extended() -> None:
+    redaction = Redaction(headers=DEFAULT_REDACTED_HEADERS | {"X-Tenant-Id"})
+    assert redaction.is_sensitive_header("x-tenant-id")
+    assert redaction.is_sensitive_header("set-cookie")
+
+
+secret_texts = st.text(st.characters(codec="utf-8", exclude_categories=["Cs"]), min_size=8)
+
+
+@given(secret_texts, st.sampled_from(["verbatim", "json", "json-ascii", "form", "path"]))
+def test_redaction_is_idempotent_and_leaves_no_secret(secret: str, encoding: str) -> None:
+    redaction = Redaction(secrets=[secret], body_paths=["user"])
+    encoded: dict[str, Any] = {
+        "verbatim": secret,
+        "json": json.dumps(secret, ensure_ascii=False)[1:-1],
+        "json-ascii": json.dumps(secret)[1:-1],
+        "form": quote_plus(secret),
+        "path": quote(secret),
+    }
+    body = f'{{"user": "u", "echo": "{encoded[encoding] if encoding.startswith("json") else "x"}"}}'
+    url = f"https://user:pw@api.example.com/{encoded['path']}?sig={encoded['form']}"
+    interaction = Interaction(
+        request(url=url, body=body.encode()),
+        RecordedResponse(200, JSON_TYPE, (Chunk(body.encode()),)),
+    )
+    once = redaction.redact(interaction)
+    assert redaction.redact(once) == once
+    assert redaction.find_secret([once]) is None
 
 
 def test_header_names_are_case_insensitive() -> None:

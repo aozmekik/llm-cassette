@@ -427,14 +427,15 @@ class Cassette:
             if not interactions and not self._file_existed:
                 self._saved_version = version
                 return False
-            location = self._redaction.find_secret(interactions)
+            text = dumps(interactions, self._format)
+            location = self._redaction.find_secret(interactions, serialized=text)
             if location is not None:
                 msg = (
                     f"refusing to write {self._path}: a configured secret appears in {location} "
                     "after redaction"
                 )
                 raise SecretLeakError(msg)
-            _atomic_write(self._path, dumps(interactions, self._format))
+            _atomic_write(self._path, text)
             self._file_existed = True
             self._saved_version = version
             return True

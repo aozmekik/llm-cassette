@@ -74,6 +74,18 @@ def parse_document(data: bytes) -> JSONDocument | None:
     return document if _depth(document) <= MAX_DEPTH else None
 
 
+def is_json_scalar(data: bytes) -> bool:
+    """Return whether ``data`` is a single JSON string, number, ``true``, ``false`` or ``null``."""
+    stripped = data.strip(_WHITESPACE)
+    if not stripped or stripped[0] in _DOCUMENT_START:
+        return False
+    try:
+        _loads(data)
+    except (UnicodeDecodeError, ValueError, RecursionError):
+        return False
+    return True
+
+
 def canonical(value: JSONValue) -> str:
     """Serialize ``value`` compactly with sorted keys, so equal documents give equal strings."""
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
