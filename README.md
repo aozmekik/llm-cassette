@@ -204,8 +204,8 @@ cassette: /project/tests/cassettes/test_chat/test_haiku.yaml (mode=none, 1 recor
 closest recorded interaction: #0, differs in: body
 --- recorded #0 body
 +++ live request body
-@@ -6,5 +6,5 @@
-     },
+@@ -2,5 +2,5 @@
+   "messages": [
      {
 -      "content": "Write a haiku about tests",
 +      "content": "Write a haiku about cassettes",
