@@ -336,7 +336,11 @@ class FakeUpstream:
         ]
 
     def _anthropic_messages(self, request: FakeRequest) -> FakeReply:
-        if "x-api-key" not in request.headers or "anthropic-version" not in request.headers:
+        # anthropic 1.x sends the key in x-api-key, 2.x as a bearer token; the API takes either.
+        has_key = "x-api-key" in request.headers or request.headers.get(
+            "authorization", ""
+        ).startswith("Bearer ")
+        if not has_key or "anthropic-version" not in request.headers:
             error = {"type": "authentication_error", "message": "x-api-key header is required"}
             return self._json(401, {"type": "error", "error": error})
         body = request.json()

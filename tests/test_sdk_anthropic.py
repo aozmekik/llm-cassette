@@ -115,7 +115,7 @@ def test_missing_credentials_are_reported_by_the_fake(
             cassette,
             transport=upstream.transport(),
             api_key=FAKE_ANTHROPIC_KEY,
-            default_headers={"x-api-key": anthropic.Omit()},
+            default_headers={"x-api-key": anthropic.Omit(), "Authorization": anthropic.Omit()},
         )
         with pytest.raises(anthropic.AuthenticationError):
             client.messages.create(model=MODEL, max_tokens=8, messages=MESSAGES)
